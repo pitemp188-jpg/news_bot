@@ -1,0 +1,36 @@
+# 模块: docker/compose.yaml
+# 职责: 一条命令拉起服务——镜像构建、挂 data/ 卷、健康检查、重启策略
+# 来源: 自研
+#
+# 用法（在仓库根目录执行）:
+#   docker compose -f docker/compose.yaml up -d --build
+#   docker compose -f docker/compose.yaml logs -f
+#
+# 前置: 根目录已存在 .env（至少含 LLM_API_KEY 与 ADMIN_PASSWORD）。
+# 注意: env_file 的 required 写法需要 Docker Compose ≥ 2.24；旧版本请删掉 required 行。
+
+services:
+  newsbot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: newsbot:0.9.0
+    container_name: newsbot
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # 与 Dockerfile 保持一致，确保容器内数据落进挂载卷
+      NEWSBOT_DATA_DIR: /app/data
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      # 命名卷：数据库、日志、浏览器 profile、微信凭证都留在这里，重建容器不丢
+      - newsbot-data:/app/data
+    restart: unless-stopped
+    # 容器内以 Chromium 抓动态页，需要更大的 /dev/shm，否则容易崩
+    shm_size: "1gb"
+
+volumes:
+  newsbot-data:

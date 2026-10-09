@@ -11,12 +11,13 @@ news_bot/
 ├── alembic.ini
 ├── config.example.yaml          # 非敏感配置样例
 ├── .env.example                 # 密钥样例（真实 .env 不入库）
+├── .dockerignore                # docker 构建上下文排除项
 ├── .github/
 │   ├── workflows/ci.yml
 │   └── pull_request_template.md
 ├── docker/
-│   ├── Dockerfile
-│   └── compose.yaml
+│   ├── Dockerfile               # 三段式构建：前端产物 → Python 依赖 → 运行时（含 Chromium）
+│   └── compose.yaml             # 一条命令拉起服务，data 用命名卷
 ├── docs/                        # 规划与规范文档（编号命名）
 ├── migrations/                  # Alembic 迁移脚本
 ├── scripts/
