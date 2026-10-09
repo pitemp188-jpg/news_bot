@@ -76,7 +76,8 @@ news_bot/
 │   ├── fixtures/pages/          # 本地静态网页，供 fetch/browser 测试
 │   ├── unit/                    # 镜像 src/newsbot 目录结构
 │   ├── integration/
-│   └── e2e/
+│   ├── e2e/
+│   └── live/                    # 真实模型 / 真实抓取（标记 live，默认不跑）
 └── data/                        # 运行时数据：db、日志、浏览器 profile、weixin/ 凭证与游标（gitignore）
 ```
 

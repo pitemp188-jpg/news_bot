@@ -71,6 +71,16 @@
 | [x] | T6.3 | 定时推送 | 默认 21:00 日报配置 | 时间快进测试触发并推送到 FakeAdapter | T6.2 |
 | [x] | T6.4 | 端到端 | `tests/e2e/` | S1、S2 两场景全链路（Fake 平台 + Fake LLM + 本地网页）通过 | T6.3 |
 
+## M6.5 真实链路联调　分支 `feat/m65-live`　tag `v0.6.5`
+
+> 目的：微信 / QQ 需要人工申请凭证，先排除平台差异，用真实模型 + 真实公网抓取把业务链路全部验证一遍。
+
+| 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
+| --- | --- | --- | --- | --- | --- |
+| [x] | T6.5 | 真实模型接入 | `.env.example`、`.env`（不入库） | 火山方舟 coding 端点（`/api/coding/v1`）OpenAI 兼容可用；纯文本与 tool-calling 均正常 | — |
+| [x] | T6.6 | 真实链路测试 | `tests/live/test_live_model.py`、`test_live_crawl.py`、`test_live_agent.py`、`test_live_smoke.py` | `live` 标记 14 个用例全绿：真实模型文本/工具调用/用量落库、真实公网抓取与 SSRF 防护、真实 Agent 规划循环、整机服务下的全部指令与 S1/S2 场景 | T6.5 |
+| [x] | T6.7 | 错误分类回归 | `core/llm.py`、`tests/unit/core/test_llm.py` | `classify_error` 对已分类的 `NewsbotError` 原样返回，不再降级为 `FatalError`（回归用例） | — |
+
 ## M7 管理 API　分支 `feat/m7-api`　tag `v0.7.0`
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
@@ -116,3 +126,4 @@
 | 2026-10-09 | Copilot | T4.1–T4.5、T5.1–T5.2 | `feat/m4-agent`(#4)、`feat/m5-result` | `check.py` 全量通过；集成测试打通队列→Agent→抓取→成稿→投递；已用内置浏览器打开 `tests/fixtures/pages/article.html`，正文渲染正常、脚本未混入 | 微信 / QQ 凭证需人工申请；browser-use 为可选依赖，未安装时 browse 返回安装提示 |
 | 2026-10-09 | Copilot | T2.1–T2.6 | `feat/m2-gateway` | `check.py` 全量通过（290 个测试）；集成测试覆盖入站→鉴权→队列→Agent 抓取→成稿→投递与 waiting_user 补投；用真实分段逻辑验证长日报切分不超平台上限 | 微信 / QQ 真实凭证与 live 测试仍待人工执行 |
 | 2026-10-09 | Copilot | T6.1–T6.4 | `feat/m6-scenarios` | `check.py` 全量通过（311 个测试，含覆盖率）；`tests/e2e/test_scenarios.py` 三个场景全部通过：S1 定时触发自动推送、S2 聊天指令查询（含重复来源去重）、notify 主动推送；e2e 抓取真实本地站点 `tests/fixtures/pages/article.html`；另用真实进程跑 `python -m newsbot notify` 冒烟，确认组装→启动→投递→关闭全链路无异常 | 界面与 API 尚未提供（M7/M8）；微信 / QQ 真实凭证与 live 测试仍待人工执行 |
+| 2026-10-09 | Copilot | T6.5–T6.7 | `feat/m65-live` | `check.py` 全量通过（315 个测试，覆盖率 93%）；`-m live tests/live` 14 个真实链路用例全绿：真实模型纯文本/tool-calling/工具结果回填/用量落库、真实公网抓取（example.com、iana.org）与 SSRF 防护、真实 Agent 规划循环、整机 assembled 服务下全部聊天指令 + S1 定时推送 + S2 聊天查询 + notify；用内置浏览器打开真实抓取的 `tests/fixtures/pages/article.html` 确认正文与断言一致 | 微信 / QQ 仍需真实凭证（下一里程碑验证）；公网站点偶发 429 / 连接失败属正常，已通过收紧步数预算与提示词约束规避 |

@@ -91,7 +91,9 @@ def _to_reply(response: Any) -> LLMReply:
 
 
 def classify_error(exc: Exception) -> type[NewsbotError]:
-    """把模型 SDK 的异常映射为本项目的错误类型。"""
+    """把模型 SDK 的异常映射为本项目的错误类型；已是本项目错误时保持原类型。"""
+    if isinstance(exc, NewsbotError):
+        return type(exc)
     if isinstance(exc, RETRYABLE_ERRORS):
         return RetriableError
     if isinstance(exc, APIStatusError):

@@ -216,7 +216,8 @@ def quality_steps(fast: bool, live: bool) -> list[tuple[str, list[str]]]:
     else:
         pytest_args += ["--cov", "--cov-report=term-missing:skip-covered"]
     if live:
-        pytest_args += ["-m", "live"]
+        # 追加 live 组：跑除 soak 之外的全部测试
+        pytest_args += ["-m", "not soak"]
     steps = [
         ("ruff check", ["-m", "ruff", "check", "."]),
         ("ruff format --check", ["-m", "ruff", "format", "--check", "."]),
