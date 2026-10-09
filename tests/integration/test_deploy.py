@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -108,3 +109,17 @@ def test_dockerignore_keeps_secrets_and_data_out() -> None:
     ignored = {line.rstrip("/") for line in lines if not line.startswith("#")}
     for needed in (".env", "data", ".git", "web/node_modules", "__pycache__"):
         assert needed in ignored, f"构建上下文应排除 {needed}"
+
+
+def test_dockerfile_copies_files_declared_in_project_metadata(dockerfile_text: str) -> None:
+    """pyproject 里声明的 readme 等元数据文件必须在构建时拷进去。
+
+    hatchling 构建项目本体时会读取 readme，缺文件会让 uv sync 直接失败——
+    这类问题只有真的构建镜像才暴露，所以用契约测试在本机就拦住。
+    """
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    readme = data["project"].get("readme")
+    if isinstance(readme, dict):
+        readme = readme.get("file")
+    assert readme, "pyproject 未声明 readme，本用例需同步调整"
+    assert readme in dockerfile_text, f"构建时缺少元数据文件 {readme}，镜像会在 uv sync 阶段失败"
