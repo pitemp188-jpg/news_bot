@@ -4,6 +4,7 @@
 > 状态：`[ ]` 未开始　`[~]` 进行中　`[x]` 完成　`[!]` 阻塞（须在“阻塞记录”写明原因）
 > 每个任务的规模控制在一次长跑会话可完成（新增代码约 ≤ 500 行 + 测试）。
 > 每个任务完成即 commit + push 到模块分支；每个里程碑完成即提 PR 合入 `main` 并打 tag。
+> 里程碑提 PR 前必须跑通 `tests/e2e/`；界面类改动必须用 VS Code 内置浏览器打开、点击并截图确认（见 [05-testing.md](05-testing.md) 第 5 节），验证结论写入 PR 与下方“长跑记录”。
 
 ## M0 工程基建　分支 `feat/m0-bootstrap`　tag `v0.0.1`
 
@@ -48,11 +49,11 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T4.1 | 搜索工具 | `agent/tools/search.py` | SearXNG / Tavily 统一返回结构；时间范围过滤；respx mock 测试 | M1 |
-| [ ] | T4.2 | 抓取工具 | `agent/tools/fetch.py` | 正文抽取、大小上限、超时、SSRF 拦截（内网/回环/非 http） | M1 |
-| [ ] | T4.3 | 浏览器工具 | `agent/tools/browser.py` | 封装 browser-use；步数/超时上限；并发信号量；本地 fixture 页面测试 | M1 |
-| [ ] | T4.4 | 资讯库工具 | `agent/tools/newsdb.py` | 按关键词 / 时间查询 `news_item` | M1 |
-| [ ] | T4.5 | 规划循环 | `agent/runner.py`、`agent/prompts.py` | tool-calling 循环；步数/token/耗时预算；输出带来源的 findings；FakeLLM 脚本化测试 | T4.1–T4.4 |
+| [x] | T4.1 | 搜索工具 | `agent/tools/search.py` | SearXNG / Tavily 统一返回结构；时间范围过滤；respx mock 测试 | M1 |
+| [x] | T4.2 | 抓取工具 | `agent/tools/fetch.py` | 正文抽取、大小上限、超时、SSRF 拦截（内网/回环/非 http） | M1 |
+| [x] | T4.3 | 浏览器工具 | `agent/tools/browser.py` | 封装 browser-use；步数/超时上限；并发信号量；本地 fixture 页面测试 | M1 |
+| [x] | T4.4 | 资讯库工具 | `agent/tools/newsdb.py` | 按关键词 / 时间查询 `news_item` | M1 |
+| [x] | T4.5 | 规划循环 | `agent/runner.py`、`agent/prompts.py` | tool-calling 循环；步数/token/耗时预算；输出带来源的 findings；FakeLLM 脚本化测试 | T4.1–T4.4 |
 
 ## M5 结果处理　分支 `feat/m5-result`　tag `v0.5.0`
 
@@ -82,8 +83,8 @@
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
 | [ ] | T8.1 | 前端脚手架 | `web/` | Vue3 + Vite + TS + Naive UI；登录页；api 封装 | M7 |
-| [ ] | T8.2 | 页面 | `web/src/views/*` | 仪表盘、任务、定时任务、资讯库、推送记录、设置；vitest 通过 | T8.1 |
-| [ ] | T8.3 | 托管 | `api/server.py` 静态挂载 | `npm run build` 后由 FastAPI 提供访问 | T8.2 |
+| [ ] | T8.2 | 页面 | `web/src/views/*` | 仪表盘、任务、定时任务、资讯库、推送记录、设置；vitest 通过；**每个页面用内置浏览器打开、点击并截图确认** | T8.1 |
+| [ ] | T8.3 | 托管 | `api/server.py` 静态挂载 | `npm run build` 后由 FastAPI 提供访问；**用内置浏览器打开实际端口页面确认渲染正常** | T8.2 |
 
 ## M9 部署运维　分支 `feat/m9-deploy`　tag `v0.9.0`
 
@@ -109,6 +110,6 @@
 
 ## 长跑记录
 
-| 日期 | 代理 | 完成任务 | 分支 / PR | 测试结果 | 遗留问题 |
+| 日期 | 代理 | 完成任务 | 分支 / PR | 测试结果（含 e2e / 浏览器验证） | 遗留问题 |
 | --- | --- | --- | --- | --- | --- |
 | 2026-10-09 | Copilot | T0.1–T0.5 | `feat/m0-bootstrap` | `check.py` 全量通过（19 个测试） | 微信 / QQ 凭证需人工申请；`main` 分支保护与 CI 检查名待你在网页端确认 |

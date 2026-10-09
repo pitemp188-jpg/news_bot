@@ -51,7 +51,6 @@ class AppSection(BaseModel):
 
 class QueueSection(BaseModel):
     concurrency: int = 2
-    browser_concurrency: int = 1
     task_timeout_seconds: int = 600
     max_attempts: int = 2
     retry_delay_seconds: float = 5.0
@@ -68,6 +67,7 @@ class AgentSection(BaseModel):
     max_tokens: int = 60000
     fetch_max_bytes: int = 2_000_000
     search_results: int = 8
+    browser_concurrency: int = 1
 
 
 class DeliverySection(BaseModel):

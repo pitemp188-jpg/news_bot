@@ -16,6 +16,7 @@ dependencies = [
     "APScheduler>=3.10",
     "httpx>=0.27",
     "openai>=1.40",
+    "trafilatura>=1.8",
 ]
 
 [dependency-groups]
@@ -76,6 +77,11 @@ no_implicit_reexport = true
 module = ["apscheduler.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# browser-use 为可选依赖，未安装时不应影响类型检查
+module = ["browser_use.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -99,3 +105,7 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
 ]
+
+[project.optional-dependencies]
+# 浏览器子 Agent 体积较大，仅在需要动态页面时安装：uv sync --extra browser
+browser = ["browser-use>=0.1"]
