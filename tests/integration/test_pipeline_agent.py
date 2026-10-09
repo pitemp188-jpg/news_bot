@@ -112,10 +112,10 @@ async def test_full_chain_from_queue_to_delivery(tmp_path: Path, local_server: s
         assert [turn["role"] for turn in history] == ["user", "assistant"]
         assert history[0]["content"] == "最近 AI 行业有什么变化"
 
-        # 同一条资讯再次收集时被去重拦下，不会重复推送
-        assert await deduper.load_recent(db, days=7) == 0  # 资讯库由采集环节另行落库
-        deduper.remember(Item(title="示例资讯：AI 行业周报", url=url, text="推理成本较上代下降约三成"))
+        # 采集到的来源已写入资讯库；同一条资讯即使换个标题或带追踪参数也会被判重
+        assert await deduper.load_recent(db, days=7) == 1
         assert deduper.is_duplicate(Item(title="换个标题", url=f"{url}?utm_source=x", text="完全不同"))
+
     finally:
         await db.dispose()
 

@@ -66,10 +66,10 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T6.1 | 聊天指令 | `gateway/commands.py` | 01 指令表全部可用；查询任务即时回执 | M2–M5 |
-| [ ] | T6.2 | 应用组装 | `app.py`、`__main__.py` | `python -m newsbot run` 启动全部组件；Ctrl+C 优雅退出 | T6.1 |
-| [ ] | T6.3 | 定时推送 | 默认 21:00 日报配置 | 时间快进测试触发并推送到 FakeAdapter | T6.2 |
-| [ ] | T6.4 | 端到端 | `tests/e2e/` | S1、S2 两场景全链路（Fake 平台 + Fake LLM + 本地网页）通过 | T6.3 |
+| [x] | T6.1 | 聊天指令 | `gateway/commands.py` | 01 指令表全部可用；查询任务即时回执 | M2–M5 |
+| [x] | T6.2 | 应用组装 | `app.py`、`__main__.py` | `python -m newsbot run` 启动全部组件；Ctrl+C 优雅退出 | T6.1 |
+| [x] | T6.3 | 定时推送 | 默认 21:00 日报配置 | 时间快进测试触发并推送到 FakeAdapter | T6.2 |
+| [x] | T6.4 | 端到端 | `tests/e2e/` | S1、S2 两场景全链路（Fake 平台 + Fake LLM + 本地网页）通过 | T6.3 |
 
 ## M7 管理 API　分支 `feat/m7-api`　tag `v0.7.0`
 
@@ -115,3 +115,4 @@
 | 2026-10-09 | Copilot | T0.1–T0.5 | `feat/m0-bootstrap` | `check.py` 全量通过（19 个测试） | 微信 / QQ 凭证需人工申请；`main` 分支保护与 CI 检查名待你在网页端确认 |
 | 2026-10-09 | Copilot | T4.1–T4.5、T5.1–T5.2 | `feat/m4-agent`(#4)、`feat/m5-result` | `check.py` 全量通过；集成测试打通队列→Agent→抓取→成稿→投递；已用内置浏览器打开 `tests/fixtures/pages/article.html`，正文渲染正常、脚本未混入 | 微信 / QQ 凭证需人工申请；browser-use 为可选依赖，未安装时 browse 返回安装提示 |
 | 2026-10-09 | Copilot | T2.1–T2.6 | `feat/m2-gateway` | `check.py` 全量通过（290 个测试）；集成测试覆盖入站→鉴权→队列→Agent 抓取→成稿→投递与 waiting_user 补投；用真实分段逻辑验证长日报切分不超平台上限 | 微信 / QQ 真实凭证与 live 测试仍待人工执行 |
+| 2026-10-09 | Copilot | T6.1–T6.4 | `feat/m6-scenarios` | `check.py` 全量通过（311 个测试，含覆盖率）；`tests/e2e/test_scenarios.py` 三个场景全部通过：S1 定时触发自动推送、S2 聊天指令查询（含重复来源去重）、notify 主动推送；e2e 抓取真实本地站点 `tests/fixtures/pages/article.html`；另用真实进程跑 `python -m newsbot notify` 冒烟，确认组装→启动→投递→关闭全链路无异常 | 界面与 API 尚未提供（M7/M8）；微信 / QQ 真实凭证与 live 测试仍待人工执行 |
