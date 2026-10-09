@@ -28,6 +28,9 @@ class Secrets(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_api_key: str = ""
     llm_model: str = "deepseek-chat"
+    # 浏览器子 Agent 专用模型：它要求快速且能稳定输出 JSON，
+    # 留空表示沿用 llm_model（实测同一平台上不同模型速度可差 8 倍）
+    llm_model_browser: str = ""
 
     search_provider: str = "searxng"
     searxng_url: str = "http://127.0.0.1:8080"
@@ -69,6 +72,12 @@ class AgentSection(BaseModel):
     fetch_max_bytes: int = 2_000_000
     search_results: int = 8
     browser_concurrency: int = 1
+    # 浏览器子 Agent 的步数预算，与上面的 max_steps（本 Agent 规划循环）是两回事
+    browser_max_steps: int = 10
+    # 单步模型调用与整步的时限；实测模型较慢时默认 90s 会被频繁打断
+    browser_timeout_seconds: int = 120
+    # 服务端默认无头；本地调试想看到窗口时改为 false
+    browser_headless: bool = True
 
 
 class DeliverySection(BaseModel):

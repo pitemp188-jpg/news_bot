@@ -113,6 +113,17 @@
 | [x] | T10.1 | 故障演练 | `tests/integration/test_faults.py` | LLM 超时、适配器断线、浏览器崩溃、数据库锁均能恢复 | M9 |
 | [x] | T10.2 | 浸泡测试 | `tests/e2e/test_soak.py`（标记 `soak`） | 24h 连续运行无内存泄漏、无僵尸浏览器进程 | T10.1 |
 
+## M11 信息获取质量　分支 `feat/m11-acquisition`
+
+M0–M10 证明了链路能跑通；这一里程碑解决“**取到的信息到底可不可信**”。
+
+| 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
+| --- | --- | --- | --- | --- | --- |
+| [x] | T11.1 | browser-use 接入 | `agent/tools/browser.py` | 真实站点能读出内容；会话复用；运行产物落在 `data/`；子 Agent 不编造字段 | M10 |
+| [x] | T11.2 | 输出质量门禁 | `tests/live/test_live_browser.py` | 子 Agent 报出的每个数字都能在页面原文中回查；未要求字段不出现 | T11.1 |
+| [ ] | T11.3 | **搜索通道不可用**：`.env` 配的是 `SEARCH_PROVIDER=searxng` 指向 `127.0.0.1:8080`，但本机没有这个服务（探测 `ConnectError`）。公共 SearXNG 实例与 DuckDuckGo 在当前网络下全部超时，仅 GitHub / Bing / 搜狗可达。而提示词硬约束了「只能用 search 或 news_db 返回过的网址」，**搜索一挂整条自动采集链路就断了**，目前只能靠人工直接给网址 | **你** 二选一：① 提供 Tavily API Key（最省事，改 `.env` 即可）；② 允许我加一个内置的 HTML 搜索提供方（抓 Bing/搜狗结果页，零配置但依赖页面结构、稳定性较差）。若你打算自建 SearXNG，需先有可用的 Docker 环境 |
+| [ ] | T11.4 | 更多信源 | 待定 | 知乎等需要登录的站点可复用 `data/browser/profile` | T11.3 |
+
 ---
 
 ## 阻塞记录
@@ -138,3 +149,4 @@
 | 2026-10-09 | Copilot | T8.1–T8.3 | `feat/m8-web` | `check.py` 全量通过（rules / ruff / mypy / pytest + 前端 lint / build / test 全绿）；用内置浏览器逐个打开并点击六个页面完成验收——错误口令 401、正确口令登录（HttpOnly 会话 + 可读 CSRF cookie）、带 `next` 的重定向、总览指标与日报流、新建订阅 `AI，半导体 每天 21:00` 并停用/启用、提交任务 #1/#2 完成后展示真实报告与 `example.com` 来源、资讯库 1 条、推送记录为空（未配投递目标，符合预期）、设置页平台已连接且不泄露密钥、重启后会话失效；界面按 AIHOT 参考实现，字体栈与长文阅读排版照搬（MIT，见 `THIRD_PARTY_NOTICES.md`），并用 `getComputedStyle` 复核实际生效字体 | 微信 iLink 凭证（`WEIXIN_ACCOUNT_ID`/`WEIXIN_TOKEN`）仍需你在平台侧获取；微信 / QQ 真实消息端到端按你的要求留到最后执行 |
 | 2026-10-09 | Copilot | T9.1–T9.3 | `feat/m9-deploy` | `check.py` 全量通过（386 个测试，覆盖率 92%）；`tests/integration/test_deploy.py` 8 个用例做部署产物契约检查——compose 的 `context`/`dockerfile` 解析基准按 Compose 规范核对（`context` 相对项目目录、`dockerfile` 相对 context）、`data` 挂卷与 `NEWSBOT_DATA_DIR` 三处一致、健康检查探测的 `/api/health` 确实是已注册路由、健康检查端口与 `CMD --port`/`EXPOSE` 一致、运行时阶段含 Chromium 与中文字体、部署产物里不出现任何密钥明文；实测 `doctor` 自检通过、`backup` 真实产出 73,728 字节快照、`notify` 真实连上 QQ 网关并在无目标时清晰报错、`/api/health` 返回 200 与平台/队列状态 | **本机没有 Docker，镜像未实际构建运行过**，需你在有 Docker 的机器上执行一次 `docker compose -f docker/compose.yaml up -d --build` 确认；容器内 Chromium 以非 root 运行需要 `--no-sandbox`，待接入 browser-use 时一并验证；微信 iLink 凭证仍待你在平台侧获取 |
 | 2026-10-09 | Copilot | T10.1–T10.2 | `feat/m10-hardening` | `check.py` 全量通过（397 个测试，覆盖率 92%）；`tests/integration/test_faults.py` 10 个用例覆盖四类故障与恢复
+| 2026-10-09 | Copilot | T11.1–T11.2 | `feat/m11-acquisition` | `check.py` 全量通过（404 个测试，覆盖率 92%）；browser-use 0.11.13 真实接入并实测：修复 `llm=None`（内核是 LLM 驱动）、`enable_default_extensions=False`（默认联网下载 uBlock 会被网络阻断并把启动拖过 30s）、`use_vision=False`、会话复用（启动约 4s 只付一次）、`TIMEOUT_BrowserStartEvent` 对齐配置、运行产物经 `XDG_*` 收进 `data/browser/`、关匿名遥测；**模型速度是决定性因素**——同一端点 `deepseek-v4-flash` 单次 17s 且 JSON 常损坏，改用 `deepseek-v4-1-flash-260910` 后约 2s 且 JSON 合法，真实抓取 github trending 3 步内成功；`tests/live/test_live_browser.py` 4 个真实质量用例：输出中每个数字都能在页面原文回查、未要求字段不出现、缺失信息如实说「页面未提供」 | **搜索通道仍不可用**（见阻塞记录）——它是一级入口，未解决前只能靠直接给网址采集；browser-use 会编造未被要求的字段，已用 `TASK_SUFFIX` 堵住并加回归断言，但更换模型后需重跑 `-m live tests/live/test_live_browser.py` 复核 |
