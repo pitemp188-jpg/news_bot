@@ -1,0 +1,9 @@
+#!/bin/sh
+# 模块: scripts.hooks.pre-commit
+# 职责: git pre-commit 钩子——提交前执行快速检查，未通过则拒绝提交
+set -e
+cd "$(git rev-parse --show-toplevel)"
+if command -v uv >/dev/null 2>&1; then
+  exec uv run python scripts/check.py --fast
+fi
+exec python scripts/check.py --fast

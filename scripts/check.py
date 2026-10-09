@@ -71,7 +71,7 @@ class Report:
 
 def source_files() -> list[Path]:
     """参与规则校验的源码文件：src、tests、scripts。"""
-    files = [*SRC.rglob("*.py"), *TESTS.rglob("*.py"), *SCRIPTS.glob("*.py")]
+    files = [*SRC.rglob("*.py"), *TESTS.rglob("*.py"), *SCRIPTS.rglob("*.py")]
     return sorted(path for path in files if "__pycache__" not in path.parts)
 
 

@@ -1,0 +1,4 @@
+#!/bin/sh
+# 模块: scripts.hooks.commit-msg
+# 职责: git commit-msg 钩子——委托 commit_msg.py 校验提交信息格式
+exec python "$(git rev-parse --show-toplevel)/scripts/hooks/commit_msg.py" "$1"
