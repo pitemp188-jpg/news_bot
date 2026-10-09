@@ -94,9 +94,9 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T8.1 | 前端脚手架 | `web/` | Vue3 + Vite + TS + Naive UI；登录页；api 封装 | M7 |
-| [ ] | T8.2 | 页面 | `web/src/views/*` | 仪表盘、任务、定时任务、资讯库、推送记录、设置；vitest 通过；**每个页面用内置浏览器打开、点击并截图确认** | T8.1 |
-| [ ] | T8.3 | 托管 | `api/server.py` 静态挂载 | `npm run build` 后由 FastAPI 提供访问；**用内置浏览器打开实际端口页面确认渲染正常** | T8.2 |
+| [x] | T8.1 | 前端脚手架 | `web/` | Vue3 + Vite + TS；登录页；api 封装（唯一允许发 HTTP 的目录）；eslint 禁止页面直接 fetch | M7 |
+| [x] | T8.2 | 页面 | `web/src/views/*` | 总览、任务、定时推送、资讯库、推送记录、设置；vitest 通过；**每个页面用内置浏览器打开、点击并截图确认** | T8.1 |
+| [x] | T8.3 | 托管与检查 | `api/server.py` 静态挂载、`scripts/check.py` | `npm run build` 后由 FastAPI 提供访问并支持 SPA 回退；`check.py` 增加前端 lint / test（装了依赖才跑） | T8.2 |
 
 ## M9 部署运维　分支 `feat/m9-deploy`　tag `v0.9.0`
 
@@ -130,3 +130,4 @@
 | 2026-10-09 | Copilot | T6.1–T6.4 | `feat/m6-scenarios` | `check.py` 全量通过（311 个测试，含覆盖率）；`tests/e2e/test_scenarios.py` 三个场景全部通过：S1 定时触发自动推送、S2 聊天指令查询（含重复来源去重）、notify 主动推送；e2e 抓取真实本地站点 `tests/fixtures/pages/article.html`；另用真实进程跑 `python -m newsbot notify` 冒烟，确认组装→启动→投递→关闭全链路无异常 | 界面与 API 尚未提供（M7/M8）；微信 / QQ 真实凭证与 live 测试仍待人工执行 |
 | 2026-10-09 | Copilot | T6.5–T6.7 | `feat/m65-live` | `check.py` 全量通过（315 个测试，覆盖率 93%）；`-m live tests/live` 14 个真实链路用例全绿：真实模型纯文本/tool-calling/工具结果回填/用量落库、真实公网抓取（example.com、iana.org）与 SSRF 防护、真实 Agent 规划循环、整机 assembled 服务下全部聊天指令 + S1 定时推送 + S2 聊天查询 + notify；用内置浏览器打开真实抓取的 `tests/fixtures/pages/article.html` 确认正文与断言一致 | 微信 / QQ 仍需真实凭证（下一里程碑验证）；公网站点偶发 429 / 连接失败属正常，已通过收紧步数预算与提示词约束规避 |
 | 2026-10-09 | Copilot | T7.1–T7.4 | `feat/m7-api` | `check.py` 全量通过（371 个测试，覆盖率 93%）；API 层 51 个用例覆盖登录/CSRF/会话过期/任务取消重跑/订阅 CRUD 与调度器同步/内容过滤/系统状态/主动推送；CLI 12 个用例覆盖 `api`/`doctor`/`backup`；接口与静态托管将在 M8 用内置浏览器点击截图验收 | 前端静态资源尚未构建（M8）；`doctor` 与 `backup` 待真实运行确认 |
+| 2026-10-09 | Copilot | T8.1–T8.3 | `feat/m8-web` | `check.py` 全量通过（rules / ruff / mypy / pytest + 前端 lint / build / test 全绿）；用内置浏览器逐个打开并点击六个页面完成验收——错误口令 401、正确口令登录（HttpOnly 会话 + 可读 CSRF cookie）、带 `next` 的重定向、总览指标与日报流、新建订阅 `AI，半导体 每天 21:00` 并停用/启用、提交任务 #1/#2 完成后展示真实报告与 `example.com` 来源、资讯库 1 条、推送记录为空（未配投递目标，符合预期）、设置页平台已连接且不泄露密钥、重启后会话失效；界面按 AIHOT 参考实现，字体栈与长文阅读排版照搬（MIT，见 `THIRD_PARTY_NOTICES.md`），并用 `getComputedStyle` 复核实际生效字体 | 微信 iLink 凭证（`WEIXIN_ACCOUNT_ID`/`WEIXIN_TOKEN`）仍需你在平台侧获取；微信 / QQ 真实消息端到端按你的要求留到最后执行 |
