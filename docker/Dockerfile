@@ -23,7 +23,8 @@ ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never
 # 先只装第三方依赖，改动源码时不必重装
-COPY pyproject.toml uv.lock ./
+# README.md 必须一起拷：pyproject 里声明了 readme，缺它 hatchling 构建项目会直接报错
+COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-install-project --extra browser
 COPY src/ ./src/
 RUN uv sync --frozen --extra browser
