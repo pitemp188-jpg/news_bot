@@ -86,6 +86,24 @@ class DeliverySection(BaseModel):
     fallback_platform: str = "qqbot"
 
 
+class SearchSection(BaseModel):
+    """搜索配置。`feeds` 用于 SEARCH_PROVIDER=feeds：订阅权威源的 RSS，按关键词过滤。"""
+
+    # 只保留实测可直连、且给出真实文章地址的源
+    feeds: list[str] = Field(
+        default_factory=lambda: [
+            "https://www.qbitai.com/feed",
+            "https://www.infoq.cn/feed",
+            "https://www.ifanr.com/feed",
+            "https://www.solidot.org/index.rss",
+            "https://techcrunch.com/feed/",
+            "https://hnrss.org/frontpage",
+        ]
+    )
+    # 单次拉取的并发上限，避免一次打开太多连接
+    feed_concurrency: int = 4
+
+
 class ApiSection(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
@@ -100,6 +118,7 @@ class Config(BaseModel):
     queue: QueueSection = Field(default_factory=QueueSection)
     schedule: ScheduleSection = Field(default_factory=ScheduleSection)
     agent: AgentSection = Field(default_factory=AgentSection)
+    search: SearchSection = Field(default_factory=SearchSection)
     delivery: DeliverySection = Field(default_factory=DeliverySection)
     api: ApiSection = Field(default_factory=ApiSection)
     secrets: Secrets = Field(default_factory=Secrets)

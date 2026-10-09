@@ -226,7 +226,12 @@ class App:
             return list(self._tools_in)
         config = self._config
         tools: list[Any] = [
-            SearchTool(config.agent, config.secrets),
+            SearchTool(
+                config.agent,
+                config.secrets,
+                feeds=config.search.feeds,
+                feed_concurrency=config.search.feed_concurrency,
+            ),
             FetchTool(config.agent, allow_private=False),
             NewsDbTool(db),
         ]
