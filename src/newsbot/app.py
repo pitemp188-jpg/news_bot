@@ -71,6 +71,7 @@ class App:
         self.router: Router | None = None
         self.scheduler: Scheduler | None = None
         self.commands: Commands | None = None
+        self.runner: Runner | None = None
 
     # ── 生命周期 ──
     async def start(self) -> dict[str, bool]:
@@ -84,6 +85,7 @@ class App:
         sessions = SessionStore(db)
         report_builder = ReportBuilder(llm, max_chars=2000)
         runner = Runner(llm, self._build_tools(db, browser=self._browser), config.agent)
+        self.runner = runner
 
         authorizer = Authorizer(
             {
@@ -123,6 +125,9 @@ class App:
             ("router", self.router.stop if self.router else None),
             ("scheduler", self.scheduler.shutdown if self.scheduler else None),
             ("queue", self.queue.stop if self.queue else None),
+            # 工具必须在队列停下之后、数据库之前关闭：浏览器兜底进程靠它回收，
+            # 顺序反了会出现任务还在用浏览器就把它关掉、或工具拿不到数据库
+            ("tools", self.runner.aclose if self.runner else None),
             ("llm", getattr(self._llm, "aclose", None)),
             ("db", self.db.dispose if self.db else None),
         ):
