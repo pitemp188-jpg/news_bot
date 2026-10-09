@@ -54,9 +54,11 @@ class FakeSender:
     def __init__(self, ok: bool = True) -> None:
         self.ok = ok
         self.sent: list[tuple[str, str, str]] = []
+        self.report_ids: list[int | None] = []
 
-    async def send(self, *, platform: str, chat_id: str, text: str) -> bool:
+    async def send(self, *, platform: str, chat_id: str, text: str, report_id: int | None = None) -> bool:
         self.sent.append((platform, chat_id, text))
+        self.report_ids.append(report_id)
         return self.ok
 
 
@@ -137,8 +139,10 @@ async def test_delivery_failure_is_retriable(tmp_path: Path) -> None:
             assert task is not None
             with pytest.raises(RetriableError):
                 await pipeline.execute(session, task)
+        # 报告在投递前已提交（避免网络 IO 期间持有写事务），但会话历史不追加
         async with db.session() as session:
-            assert (await session.execute(select(Report))).scalars().all() == []
+            assert len((await session.execute(select(Report))).scalars().all()) == 1
+        assert await SessionStore(db).load("qqbot", "c1") == []
     finally:
         await db.dispose()
 

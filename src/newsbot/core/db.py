@@ -16,9 +16,11 @@ from newsbot.core.models import Base
 
 
 def _enable_wal(dbapi_connection: object, _record: object) -> None:
+    """开启 WAL 并设置忙等待，避免后台任务与投递并发写时直接判锁冲突。"""
     cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 

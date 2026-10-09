@@ -103,6 +103,8 @@ class Delivery(Base):
     report_id: Mapped[int | None] = mapped_column(ForeignKey("report.id"), default=None, index=True)
     platform: Mapped[str] = mapped_column(String(16))
     chat_id: Mapped[str] = mapped_column(String(128), index=True)
+    # 待投递文本；无报告来源（如临时通知）时补投递只依赖这里
+    content: Mapped[str | None] = mapped_column(Text, default=None)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     attempts: Mapped[int] = mapped_column(default=0)
     error: Mapped[str | None] = mapped_column(Text, default=None)

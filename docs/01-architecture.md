@@ -139,7 +139,7 @@ sequenceDiagram
 | `chat_session` | platform, chat_id, user_id, history(json), updated_at | 最近 N 轮对话，用于追问 |
 | `news_item` | id, url, url_hash, title, source, published_at, content_hash, simhash, fetched_at | 资讯库，去重依据 |
 | `report` | id, task_id, content, sources(json), created_at | 生成的回复 / 日报 |
-| `delivery` | id, report_id, platform, chat_id, status(pending/sent/failed/waiting_user), attempts, error, sent_at | 投递记录；`waiting_user` 等待用户下次发消息时补投 |
+| `delivery` | id, report_id, platform, chat_id, content, status(pending/sent/failed/waiting_user), attempts, error, sent_at | 投递记录；`content` 保存待发文本，使无报告的推送也能补投；`waiting_user` 等待用户下次发消息时补投 |
 | `llm_usage` | id, task_id, model, prompt_tokens, completion_tokens, created_at | 成本统计 |
 
 ## 7. 任务状态机
