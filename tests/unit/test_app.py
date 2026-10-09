@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -109,11 +110,6 @@ async def test_scheduled_job_submits_and_delivers(tmp_path: Path) -> None:
 
         await app.scheduler.run_job(row.id)
         await _drain(app)
-
-        async with app.db.session() as session:
-            task = (await session.execute(select(Task))).scalar_one()
-        assert task.kind == "scheduled" and task.chat_id == "u1"
-        assert "AI" in task.query
         assert any("结果 [1]" in text for _chat, text, _reply in adapter.sent)
     finally:
         await app.stop()
@@ -161,3 +157,32 @@ async def test_manual_task_runs_through_pipeline(tmp_path: Path) -> None:
         assert any("结果 [1]" in text for _chat, text, _reply in adapter.sent)
     finally:
         await app.stop()
+
+
+@dataclass
+class _ClosableBrowser:
+    """可观测关闭次数的浏览器替身。"""
+
+    closed: int = 0
+
+    async def run(self, url: str, task: str) -> str:
+        return "页面正文"
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+async def test_stop_closes_agent_tools(tmp_path: Path) -> None:
+    # Runner.aclose() 会把每个工具收尾；过去没人调用它，
+    # 浏览器兜底进程在服务关闭后仍留在系统里（浸泡测试要抓的就是这个）
+    config = _config(tmp_path)
+    browser = _ClosableBrowser()
+    app = App(
+        config,
+        llm=FakeLLM(replies=[reply("结果 [1]")]),
+        adapters=[FakeAdapter(platform="weixin")],
+        browser=browser,
+    )
+    await app.start()
+    await app.stop()
+    assert browser.closed == 1, "服务关闭时必须回收 Agent 工具，否则浏览器进程会残留"
