@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from pathlib import Path
 
 import httpx
@@ -372,6 +374,18 @@ def test_long_word_windows_do_not_leak_into_note() -> None:
     assert all(word in _phrases(query) for word in quoted)
 
 
+def test_ascii_keywords_require_word_boundary() -> None:
+    # 英文源里几乎每篇都含 said/email/chain，子串匹配会把「AI」变成万能匹配
+    items = [
+        {"title": "He said the email chain failed", "url": "https://a/1", "snippet": "", "published": ""},
+        {"title": "OpenAI ships a new model", "url": "https://a/2", "snippet": "", "published": ""},
+        {"title": "AI 芯片新进展", "url": "https://a/3", "snippet": "", "published": ""},
+    ]
+    hits, note = match_feed_items(items, "AI", limit=5)
+    assert [hit["url"] for hit in hits] == ["https://a/3"], "只有真正独立的 AI 才算命中"
+    assert note == ""
+
+
 def test_match_feed_items_deduplicates_and_limits() -> None:
     items = [
         {"title": "同名文章", "url": "https://a/1", "snippet": "", "published": "2026-10-09T09:00:00+00:00"},
@@ -402,3 +416,37 @@ def test_match_feed_items_deduplicates_and_limits() -> None:
 )
 def test_clean_snippet_thresholds(raw: str, expected_empty: bool) -> None:
     assert (clean_snippet(raw) == "") is expected_empty
+
+
+@respx.mock
+async def test_feeds_provider_does_not_wait_for_slow_feed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # hnrss 实测会挂 20～36 秒，而检索必须等所有源返回；单源超时必须让它被放弃
+    good = "https://good.example/feed"
+    slow = "https://slow.example/feed"
+    respx.get(good).mock(return_value=httpx.Response(200, text=FEED_FIXTURE.read_text(encoding="utf-8")))
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, text="")
+
+    respx.get(slow).mock(side_effect=hang)
+    tool = SearchTool(
+        AgentSection(search_results=3),
+        Secrets(search_provider="feeds"),
+        feeds=[good, slow],
+        feed_timeout=0.05,
+    )
+    started = time.monotonic()
+    result = await tool.run("厄尔尼诺")
+    elapsed = time.monotonic() - started
+    assert elapsed < 1, f"不该等慢源，实际耗时 {elapsed:.2f}s"
+    assert result.sources, "好源的结果必须保留"
+    await tool.aclose()
+
+
+@respx.mock
+async def test_feeds_provider_without_feeds_is_reported() -> None:
+    tool = SearchTool(AgentSection(), Secrets(search_provider="feeds"), feeds=[])
+    result = await tool.run("AI")
+    assert "没有搜索到相关结果" in result.text
+    await tool.aclose()

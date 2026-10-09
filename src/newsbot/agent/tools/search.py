@@ -40,6 +40,9 @@ DEFAULT_FEEDS = (
     "https://techcrunch.com/feed/",
     "https://hnrss.org/frontpage",
 )
+# 单个订阅源的最长等待：hnrss 实测会挂 20～36 秒，而检索必须等所有源返回，
+# 不给单源设上限就会让一次搜索白等半分钟
+DEFAULT_FEED_TIMEOUT = 8.0
 # Bing 结果块；旧结构用 li.b_algo，同时兼容 b_algo 出现在 div 上的情况
 _BING_BLOCK = re.compile(
     r'<(?:li|div)[^>]*class="[^"]*\bb_algo\b[^"]*".*?(?=<(?:li|div)[^>]*class="[^"]*\bb_algo\b|</ol>)', re.S
@@ -318,6 +321,18 @@ def _keywords(query: str) -> list[str]:
     return words
 
 
+def _hit(word: str, text: str) -> bool:
+    """判断关键词是否真的出现在文本里。
+
+    中文按子串判断（没有词边界），ASCII 关键词必须要求两侧不是字母数字：否则
+    「AI」会命中 said、email、chain、openai 里的字母组合——TechCrunch 与 HN 这些
+    英文源里几乎每篇都含 said/email，等于把「AI」变成了万能匹配。
+    """
+    if word.isascii():
+        return re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
+    return word in text
+
+
 def _score(item: dict[str, str], query: str, keywords: list[str]) -> int:
     """相关度打分：整串命中权重最高，命中关键词越多分越高。
 
@@ -328,14 +343,14 @@ def _score(item: dict[str, str], query: str, keywords: list[str]) -> int:
     snippet = item["snippet"].lower()
     phrase = query.strip().lower()
     score = 0
-    if phrase and phrase in title:
+    if phrase and _hit(phrase, title):
         score += 4
-    elif phrase and phrase in snippet:
+    elif phrase and _hit(phrase, snippet):
         score += 2
     for word in keywords:
-        if word in title:
+        if _hit(word, title):
             score += 2
-        elif word in snippet:
+        elif _hit(word, snippet):
             score += 1
     return score
 
@@ -367,7 +382,7 @@ def match_feed_items(items: list[dict[str, str]], query: str, limit: int) -> tup
     if not matched:
         return unique, "订阅源里没有匹配该关键词的条目，以下是各源最新内容："
     hit_words = {
-        word for word in phrases if any(word.lower() in (i["title"] + i["snippet"]).lower() for i, _ in matched)
+        word for word in phrases if any(_hit(word.lower(), (i["title"] + i["snippet"]).lower()) for i, _ in matched)
     }
     missing = [word for word in phrases if word not in hit_words]
     if missing and len(phrases) > 1:
@@ -405,12 +420,16 @@ class SearchTool:
         feed_concurrency: int = 4,
         client: httpx.AsyncClient | None = None,
         timeout: float = 20.0,
+        feed_timeout: float | None = None,
     ) -> None:
         self._settings = settings
         self._secrets = secrets
         self._feeds = list(feeds if feeds is not None else DEFAULT_FEEDS)
         self._feed_concurrency = max(1, feed_concurrency)
         self._timeout = timeout
+        # 单个源的最长等待：实测 hnrss 会挂 20～36 秒，而检索要等所有源返回，
+        # 不给单源设上限就会让一次搜索白等半分钟。默认取总超时的 40%。
+        self._feed_timeout = feed_timeout if feed_timeout is not None else min(timeout * 0.4, DEFAULT_FEED_TIMEOUT)
         self._client = client
         self._owns_client = client is None
 
@@ -462,9 +481,11 @@ class SearchTool:
         async def fetch(url: str) -> list[dict[str, str]]:
             async with gate:
                 try:
-                    response = await self._http().get(url, headers={"User-Agent": USER_AGENT})
+                    response = await asyncio.wait_for(
+                        self._http().get(url, headers={"User-Agent": USER_AGENT}), timeout=self._feed_timeout
+                    )
                     response.raise_for_status()
-                except Exception as exc:  # 单个源失败不该拖垮整次检索
+                except Exception as exc:  # 单个源失败或超时都不该拖垮整次检索
                     logger.warning("订阅源拉取失败 %s: %s", url, exc)
                     return []
                 return parse_feed(response.text, _host(url))
