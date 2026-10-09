@@ -153,12 +153,22 @@ class Pipeline:
         kept = [source for source, item in zip(sources, items, strict=True) if _keep(deduper, item)]
         if len(kept) == len(items):
             return
+        dropped = [source for source, item in zip(sources, items, strict=True) if source not in kept]
         logger.info("去重过滤 %d 条重复来源", len(items) - len(kept))
         if not kept:
             findings.sources = []
             findings.answer = f"{findings.answer}\n\n（以上来源均与近期推送重复，已去重。）".strip()
             return
         findings.sources = kept
+        # 编号存在来源里，所以剔除后不会错位；但正文仍会引用已被剔除的编号，
+        # 必须在开头就说明，否则读者看到正文里的 [S4] 却在来源列表里找不到它
+        marks = [str(item.get("label", "") or "") for item in dropped if item.get("label")]
+        if marks:
+            listed = f"{marks[0]}–{marks[-1]}" if len(marks) > 2 else "、".join(marks)
+            findings.answer = (
+                f"（注：本次检索到的 {len(dropped)} 条来源（{listed}）与近期推送重复，"
+                f"未重复列出；正文引用这些编号时，指上期已推送过的内容。）\n\n{findings.answer}"
+            ).strip()
 
     async def _store_sources(self, sources: list[dict[str, str]]) -> None:
         """把新来源写入资讯库，供后续任务复用与去重。"""

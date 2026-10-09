@@ -107,7 +107,7 @@ async def test_full_chain_from_queue_to_delivery(tmp_path: Path, local_server: s
             report = (await session.execute(select(Report))).scalar_one()
             task_row = (await session.execute(select(Task))).scalar_one()
         assert report.task_id == task_row.id
-        assert report.sources == [{"title": "示例资讯：AI 行业周报", "url": url}]
+        assert report.sources == [{"title": "示例资讯：AI 行业周报", "url": url, "label": "S1"}]
         history = await SessionStore(db).load("qqbot", "c1")
         assert [turn["role"] for turn in history] == ["user", "assistant"]
         assert history[0]["content"] == "最近 AI 行业有什么变化"

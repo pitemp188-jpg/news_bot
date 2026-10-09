@@ -40,22 +40,25 @@ def to_plain(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", plain).strip()
 
 
-def add_source_list(text: str, sources: list[dict[str, str]], labels: list[str] | None = None) -> str:
+def source_label(item: dict[str, str], index: int) -> str:
+    """来源的编号：优先用来源自带的 label，缺了才按位置兜底。"""
+    label = str(item.get("label", "") or "").strip()
+    return label or f"S{index}"
+
+
+def add_source_list(text: str, sources: list[dict[str, str]]) -> str:
     """在正文末尾追加编号来源；编号与模型在工具输出里看到的一致（S1、S2…）。
 
     过去这里自己从 1 重新编号并截断到 10 条，导致正文的 [1] 与列表第 1 条
     根本不是同一篇（实测日报正文写"出自爱范儿早报"，列表第 1 条却是 InfoQ
-    的另一篇），被引用的来源还可能因截断直接消失。现在改用全局编号且不截断。
+    的另一篇），被引用的来源还可能因截断直接消失。现在编号存在来源里、不截断。
     """
     if not sources:
         return text
-    marks = list(labels or []) or [f"S{index}" for index in range(1, len(sources) + 1)]
-    marks += [f"S{index}" for index in range(len(marks) + 1, len(sources) + 1)]
     lines = []
-    for index, item in enumerate(sources):
-        mark = marks[index] if index < len(marks) else f"S{index + 1}"
+    for index, item in enumerate(sources, 1):
         title = item.get("title") or item.get("url") or ""
-        lines.append(f"{mark}. {title} {item.get('url', '')}".rstrip())
+        lines.append(f"{source_label(item, index)}. {title} {item.get('url', '')}".rstrip())
     return f"{text}\n\n来源：\n" + "\n".join(lines)
 
 
@@ -69,27 +72,25 @@ class ReportBuilder:
     async def build(self, task: Task, findings: Any) -> BuiltReport:
         answer = str(getattr(findings, "answer", "") or "").strip()
         sources = [dict(item) for item in (getattr(findings, "sources", None) or [])]
-        labels = [str(item) for item in (getattr(findings, "labels", None) or [])]
         if not answer:
-            answer = await self._summarize(task, sources, labels)
-        content = add_source_list(answer, sources, labels)
+            answer = await self._summarize(task, sources)
+        content = add_source_list(answer, sources)
         if len(content) > self._max_chars:
             # 只能截正文，不能把来源列表截掉——否则被引用的来源会消失
-            sources_block = add_source_list("", sources, labels)
+            sources_block = add_source_list("", sources)
             room = max(0, self._max_chars - len(sources_block))
             answer = answer[:room] + "\n…（内容过长已截断）"
-            content = add_source_list(answer, sources, labels)
+            content = add_source_list(answer, sources)
         return BuiltReport(content=content, sources=sources)
 
-    async def _summarize(self, task: Task, sources: list[dict[str, str]], labels: list[str] | None = None) -> str:
+    async def _summarize(self, task: Task, sources: list[dict[str, str]]) -> str:
         if not sources:
             return "本次没有采集到可用信息，请稍后重试或换一种问法。"
         if self._llm is None:
             return "本次未生成结论，以下是可参考的来源："
-        marks = list(labels or []) or [f"S{index}" for index in range(1, len(sources) + 1)]
-        marks += [f"S{index}" for index in range(len(marks) + 1, len(sources) + 1)]
         listing = "\n".join(
-            f"{marks[index]}. {item.get('title', '')} {item.get('url', '')}" for index, item in enumerate(sources)
+            f"{source_label(item, index)}. {item.get('title', '')} {item.get('url', '')}"
+            for index, item in enumerate(sources, 1)
         )
         try:
             reply = await self._llm.complete(

@@ -13,11 +13,14 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
+from newsbot.agent.runner import Findings
 from newsbot.core.db import Database
 from newsbot.core.errors import RetriableError
 from newsbot.core.models import Report, Task
 from newsbot.dispatcher.pipeline import Pipeline
 from newsbot.dispatcher.session import SessionStore
+from newsbot.result.dedup import Deduper, Item
+from newsbot.result.report import ReportBuilder
 
 
 @dataclass
@@ -102,6 +105,51 @@ async def test_full_chain_persists_and_delivers(tmp_path: Path) -> None:
             {"role": "user", "content": "今天 AI 新闻"},
             {"role": "assistant", "content": "报告正文"},
         ]
+    finally:
+        await db.dispose()
+
+
+async def test_dedup_keeps_source_labels_aligned(tmp_path: Path) -> None:
+    """去重剔除来源后，正文引用的编号仍要指向同一条来源（回归用例）。
+
+    实测缺陷：编号曾与 sources 分成两个平行列表，去重把 14 条删到 2 条后编号
+    整体前移，正文的 [S2] 指到了另一篇文章上。编号现在存在来源自身里。
+    """
+    db = await _make_db(tmp_path)
+    try:
+        findings = Findings(
+            answer="结论 [S9] [S14]",
+            sources=[
+                {"title": "旧的", "url": "https://example.com/dup", "label": "S9"},
+                {"title": "新的", "url": "https://example.com/new", "label": "S14"},
+            ],
+        )
+        deduper = Deduper()
+        deduper.remember(Item(title="旧的", url="https://example.com/dup"))
+
+        async def fixed() -> Deduper:
+            return deduper
+
+        pipeline = Pipeline(
+            db,
+            runner=FakeRunner(findings=findings),
+            reporter=ReportBuilder(),
+            sender=FakeSender(),
+            sessions=SessionStore(db),
+            deduper=fixed,
+        )
+        task_id = await _make_task(db)
+        async with db.session() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            content = await pipeline.execute(session, task)
+
+        assert "S14. 新的 https://example.com/new" in content
+        assert "S9. " not in content.split("）")[-1]
+        # 被剔除的编号要如实说明，而且必须前置：读者先看到正文的 [S9] 才找来源就晚了
+        assert content.startswith("（注：")
+        assert "S9" in content.split("\n\n")[0]
+        assert "与近期推送重复" in content
     finally:
         await db.dispose()
 
