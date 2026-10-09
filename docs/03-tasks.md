@@ -59,8 +59,8 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T5.1 | 去重 | `result/dedup.py` | URL 归一化、内容哈希、simhash 近似去重、对比近 7 天已推送 | M1 |
-| [ ] | T5.2 | 成稿 | `result/report.py` | LLM 摘要、引用编号 [1][2]、来源列表、按平台转纯文本并分段 | T5.1 |
+| [x] | T5.1 | 去重 | `result/dedup.py` | URL 归一化、内容哈希、simhash 近似去重、对比近 7 天已推送 | M1 |
+| [x] | T5.2 | 成稿 | `result/report.py` | LLM 摘要、引用编号 [1][2]、来源列表、按平台转纯文本并分段 | T5.1 |
 
 ## M6 场景联调　分支 `feat/m6-scenarios`　tag `v0.6.0`
 
@@ -113,3 +113,4 @@
 | 日期 | 代理 | 完成任务 | 分支 / PR | 测试结果（含 e2e / 浏览器验证） | 遗留问题 |
 | --- | --- | --- | --- | --- | --- |
 | 2026-10-09 | Copilot | T0.1–T0.5 | `feat/m0-bootstrap` | `check.py` 全量通过（19 个测试） | 微信 / QQ 凭证需人工申请；`main` 分支保护与 CI 检查名待你在网页端确认 |
+| 2026-10-09 | Copilot | T4.1–T4.5、T5.1–T5.2 | `feat/m4-agent`(#4)、`feat/m5-result` | `check.py` 全量通过；集成测试打通队列→Agent→抓取→成稿→投递；已用内置浏览器打开 `tests/fixtures/pages/article.html`，正文渲染正常、脚本未混入 | 微信 / QQ 凭证需人工申请；browser-use 为可选依赖，未安装时 browse 返回安装提示 |
