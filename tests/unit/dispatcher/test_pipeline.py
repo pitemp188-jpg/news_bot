@@ -106,6 +106,59 @@ async def test_full_chain_persists_and_delivers(tmp_path: Path) -> None:
         await db.dispose()
 
 
+async def test_model_usage_is_persisted(tmp_path: Path) -> None:
+    """每次模型调用的用量都要落库，否则后台的成本统计永远是 0（回归用例）。"""
+    from newsbot.agent.runner import Findings
+    from newsbot.core.llm import Usage
+    from newsbot.core.models import LlmUsage
+
+    db = await _make_db(tmp_path)
+    try:
+        findings = Findings(
+            answer="结论",
+            usages=[
+                Usage(prompt_tokens=120, completion_tokens=30, model="deepseek-v4-flash"),
+                Usage(prompt_tokens=200, completion_tokens=80, model="deepseek-v4-flash"),
+            ],
+        )
+        pipeline = Pipeline(
+            db, runner=FakeRunner(findings), reporter=FakeReporter(), sender=FakeSender(), sessions=SessionStore(db)
+        )
+        task_id = await _make_task(db)
+        async with db.session() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            await pipeline.execute(session, task)
+
+        async with db.session() as session:
+            rows = (await session.execute(select(LlmUsage).order_by(LlmUsage.id))).scalars().all()
+        assert [(row.prompt_tokens, row.completion_tokens) for row in rows] == [(120, 30), (200, 80)]
+        assert {row.model for row in rows} == {"deepseek-v4-flash"}
+        assert {row.task_id for row in rows} == {task_id}
+    finally:
+        await db.dispose()
+
+
+async def test_runner_without_usage_writes_nothing(tmp_path: Path) -> None:
+    """没有用量信息时不要写空记录。"""
+    from newsbot.core.models import LlmUsage
+
+    db = await _make_db(tmp_path)
+    try:
+        pipeline = Pipeline(
+            db, runner=FakeRunner("findings"), reporter=FakeReporter(), sender=FakeSender(), sessions=SessionStore(db)
+        )
+        task_id = await _make_task(db)
+        async with db.session() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            await pipeline.execute(session, task)
+        async with db.session() as session:
+            assert list((await session.execute(select(LlmUsage))).scalars()) == []
+    finally:
+        await db.dispose()
+
+
 async def test_history_is_passed_to_runner(tmp_path: Path) -> None:
     db = await _make_db(tmp_path)
     try:

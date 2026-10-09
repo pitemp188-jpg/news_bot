@@ -13,7 +13,7 @@ from typing import Any
 from newsbot.agent.prompts import build_messages
 from newsbot.agent.tools.base import Tool, ToolResult, tool_schema
 from newsbot.core.config import AgentSection
-from newsbot.core.llm import LLM, ToolCall
+from newsbot.core.llm import LLM, ToolCall, Usage
 from newsbot.core.log import get_logger
 
 logger = get_logger(__name__)
@@ -28,6 +28,8 @@ class Findings:
     steps: int = 0
     tokens: int = 0
     budget_exhausted: bool = False
+    # 每次模型调用的用量，由调用方（流水线）写入 llm_usage
+    usages: list[Usage] = field(default_factory=list)
 
 
 def _assistant_message(content: str, calls: list[ToolCall]) -> dict[str, Any]:
@@ -57,10 +59,12 @@ class Runner:
         messages = build_messages(query, history)
         schemas = [tool_schema(tool) for tool in self._tools.values()]
         sources: dict[str, dict[str, str]] = {}
+        usages: list[Usage] = []
         tokens = 0
 
         for step in range(1, self._settings.max_steps + 1):
             reply = await self._llm.complete(messages, tools=schemas or None)
+            usages.append(reply.usage())
             tokens += reply.prompt_tokens + reply.completion_tokens
             if not reply.tool_calls:
                 return Findings(
@@ -68,6 +72,7 @@ class Runner:
                     sources=list(sources.values()),
                     steps=step,
                     tokens=tokens,
+                    usages=usages,
                 )
 
             messages.append(_assistant_message(reply.content, reply.tool_calls))
@@ -79,9 +84,9 @@ class Runner:
 
             if tokens >= self._settings.max_tokens:
                 logger.warning("任务 token 超出预算 %d，提前收敛", self._settings.max_tokens)
-                return self._summarize(sources, tokens, step, "token 预算")
+                return self._summarize(sources, usages, tokens, step, "token 预算")
 
-        return self._summarize(sources, tokens, self._settings.max_steps, "步数上限")
+        return self._summarize(sources, usages, tokens, self._settings.max_steps, "步数上限")
 
     async def _invoke(self, call: ToolCall) -> ToolResult:
         tool = self._tools.get(call.name)
@@ -94,14 +99,21 @@ class Runner:
             logger.warning("工具 %s 执行失败: %s", call.name, exc)
             return ToolResult.failure(f"{call.name}: {exc}")
 
-    def _summarize(self, sources: dict[str, dict[str, str]], tokens: int, steps: int, reason: str) -> Findings:
+    def _summarize(
+        self, sources: dict[str, dict[str, str]], usages: list[Usage], tokens: int, steps: int, reason: str
+    ) -> Findings:
         if sources:
             listed = "\n".join(f"- {item['title']} {item['url']}" for item in sources.values())
             answer = f"已达到{reason}，未能给出完整结论。已收集到以下来源：\n{listed}"
         else:
             answer = f"已达到{reason}，未能收集到可用信息，请稍后重试或换一种问法。"
         return Findings(
-            answer=answer, sources=list(sources.values()), steps=steps, tokens=tokens, budget_exhausted=True
+            answer=answer,
+            sources=list(sources.values()),
+            steps=steps,
+            tokens=tokens,
+            budget_exhausted=True,
+            usages=usages,
         )
 
     async def aclose(self) -> None:
