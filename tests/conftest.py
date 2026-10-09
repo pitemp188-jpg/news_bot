@@ -21,7 +21,10 @@ _LOOPBACK = {"127.0.0.1", "::1", "localhost", ""}
 
 
 @pytest.fixture(autouse=True)
-def _block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
+def _block_external_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    # live 测试需要真实联网（真实模型 / 真实抓取），其余测试一律禁止外部网络
+    if request.node.get_closest_marker("live") is not None:
+        return
     real_connect = socket.socket.connect
 
     def guard(self: socket.socket, address: object, *args: object, **kwargs: object) -> object:

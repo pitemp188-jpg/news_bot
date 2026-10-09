@@ -15,7 +15,7 @@ from openai import OpenAIError
 
 from newsbot.core import llm as llm_module
 from newsbot.core.config import Secrets
-from newsbot.core.errors import FatalError, RetriableError
+from newsbot.core.errors import AuthError, FatalError, NewsbotError, RetriableError
 from newsbot.core.llm import OpenAIClient, classify_error
 
 
@@ -129,6 +129,12 @@ async def test_close_is_optional() -> None:
 @pytest.mark.parametrize("exc", [OpenAIError("x"), ValueError("x")])
 def test_classify_unknown_errors_are_fatal(exc: Exception) -> None:
     assert classify_error(exc) is FatalError
+
+
+@pytest.mark.parametrize("exc", [AuthError("x"), RetriableError("x"), FatalError("x")])
+def test_classify_keeps_existing_newsbot_error(exc: NewsbotError) -> None:
+    # 已包装好的错误不能再被降级成 FatalError，否则重试与鉴权分支会失效
+    assert classify_error(exc) is type(exc)
 
 
 async def test_fake_llm_returns_scripted_replies() -> None:

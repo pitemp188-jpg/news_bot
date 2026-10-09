@@ -7,7 +7,7 @@
 | 单元 | `tests/unit/` | 默认 | 全部替身 | 每次提交（pre-commit `--fast`）、CI |
 | 集成 | `tests/integration/` | `integration` | 真实 SQLite、本地网页、Fake 平台 / LLM | CI |
 | 端到端 | `tests/e2e/` | `e2e` | 全链路，Fake 平台 + Fake LLM + 本地网页 + 真实浏览器 | CI（PR 合入前）|
-| 真实服务 | 任意 | `live` | 真实 LLM / 搜索 / 微信 / QQ | 手动或每日定时，需密钥 |
+| 真实服务 | `tests/live/` | `live` | 真实 LLM / 搜索 / 微信 / QQ | 手动或每日定时，需密钥 |
 | 浸泡 | `tests/e2e/test_soak.py` | `soak` | 同 e2e | 手动，发版前 |
 
 默认 `pytest` 只运行未标记 + `integration` + `e2e`；`live`、`soak` 需显式 `-m`。

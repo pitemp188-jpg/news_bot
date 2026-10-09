@@ -14,6 +14,13 @@ def test_system_prompt_states_untrusted_web() -> None:
     assert "news_db" in SYSTEM_PROMPT
 
 
+def test_system_prompt_forbids_inventing_urls() -> None:
+    # 实测模型会凭空抓取记忆中的网站（如 theverge），必须显式禁止
+    assert "禁止凭印象拼凑或猜测网址" in SYSTEM_PROMPT
+    assert "只能使用 search 或 news_db 返回过的网址" in SYSTEM_PROMPT
+    assert "不要凭空补充" in SYSTEM_PROMPT
+
+
 def test_messages_start_with_system_and_end_with_query() -> None:
     messages = build_messages("今天有什么新闻")
     assert messages[0]["role"] == "system"
