@@ -110,8 +110,8 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T10.1 | 故障演练 | `tests/integration/test_faults.py` | LLM 超时、适配器断线、浏览器崩溃、数据库锁均能恢复 | M9 |
-| [ ] | T10.2 | 浸泡测试 | `tests/e2e/test_soak.py`（标记 `soak`） | 24h 连续运行无内存泄漏、无僵尸浏览器进程 | T10.1 |
+| [x] | T10.1 | 故障演练 | `tests/integration/test_faults.py` | LLM 超时、适配器断线、浏览器崩溃、数据库锁均能恢复 | M9 |
+| [x] | T10.2 | 浸泡测试 | `tests/e2e/test_soak.py`（标记 `soak`） | 24h 连续运行无内存泄漏、无僵尸浏览器进程 | T10.1 |
 
 ---
 
@@ -132,3 +132,4 @@
 | 2026-10-09 | Copilot | T7.1–T7.4 | `feat/m7-api` | `check.py` 全量通过（371 个测试，覆盖率 93%）；API 层 51 个用例覆盖登录/CSRF/会话过期/任务取消重跑/订阅 CRUD 与调度器同步/内容过滤/系统状态/主动推送；CLI 12 个用例覆盖 `api`/`doctor`/`backup`；接口与静态托管将在 M8 用内置浏览器点击截图验收 | 前端静态资源尚未构建（M8）；`doctor` 与 `backup` 待真实运行确认 |
 | 2026-10-09 | Copilot | T8.1–T8.3 | `feat/m8-web` | `check.py` 全量通过（rules / ruff / mypy / pytest + 前端 lint / build / test 全绿）；用内置浏览器逐个打开并点击六个页面完成验收——错误口令 401、正确口令登录（HttpOnly 会话 + 可读 CSRF cookie）、带 `next` 的重定向、总览指标与日报流、新建订阅 `AI，半导体 每天 21:00` 并停用/启用、提交任务 #1/#2 完成后展示真实报告与 `example.com` 来源、资讯库 1 条、推送记录为空（未配投递目标，符合预期）、设置页平台已连接且不泄露密钥、重启后会话失效；界面按 AIHOT 参考实现，字体栈与长文阅读排版照搬（MIT，见 `THIRD_PARTY_NOTICES.md`），并用 `getComputedStyle` 复核实际生效字体 | 微信 iLink 凭证（`WEIXIN_ACCOUNT_ID`/`WEIXIN_TOKEN`）仍需你在平台侧获取；微信 / QQ 真实消息端到端按你的要求留到最后执行 |
 | 2026-10-09 | Copilot | T9.1–T9.3 | `feat/m9-deploy` | `check.py` 全量通过（386 个测试，覆盖率 92%）；`tests/integration/test_deploy.py` 8 个用例做部署产物契约检查——compose 的 `context`/`dockerfile` 解析基准按 Compose 规范核对（`context` 相对项目目录、`dockerfile` 相对 context）、`data` 挂卷与 `NEWSBOT_DATA_DIR` 三处一致、健康检查探测的 `/api/health` 确实是已注册路由、健康检查端口与 `CMD --port`/`EXPOSE` 一致、运行时阶段含 Chromium 与中文字体、部署产物里不出现任何密钥明文；实测 `doctor` 自检通过、`backup` 真实产出 73,728 字节快照、`notify` 真实连上 QQ 网关并在无目标时清晰报错、`/api/health` 返回 200 与平台/队列状态 | **本机没有 Docker，镜像未实际构建运行过**，需你在有 Docker 的机器上执行一次 `docker compose -f docker/compose.yaml up -d --build` 确认；容器内 Chromium 以非 root 运行需要 `--no-sandbox`，待接入 browser-use 时一并验证；微信 iLink 凭证仍待你在平台侧获取 |
+| 2026-10-09 | Copilot | T10.1–T10.2 | `feat/m10-hardening` | `check.py` 全量通过（397 个测试，覆盖率 92%）；`tests/integration/test_faults.py` 10 个用例覆盖四类故障与恢复

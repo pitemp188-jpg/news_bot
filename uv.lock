@@ -2184,6 +2184,7 @@ browser = [
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -2214,6 +2215,7 @@ provides-extras = ["browser"]
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = ">=1.11" },
+    { name = "psutil", specifier = ">=7.2.2" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-cov", specifier = ">=5.0" },

@@ -12,6 +12,25 @@
 
 默认 `pytest` 只运行未标记 + `integration` + `e2e`；`live`、`soak` 需显式 `-m`。
 
+### 浸泡测试怎么跑
+
+`tests/e2e/test_soak.py` 用 Fake 平台 + Fake LLM 反复跑完整链路，观测常驻内存、存活 asyncio
+任务数、未收敛任务与残留浏览器进程。默认 24 小时，发版前手动执行；本地验证可用环境变量缩短：
+
+```bash
+NEWSBOT_SOAK_SECONDS=60 NEWSBOT_SOAK_INTERVAL=10 \
+  uv run python -m pytest -m soak tests/e2e/test_soak.py -s
+```
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `NEWSBOT_SOAK_SECONDS` | `86400` | 总时长 |
+| `NEWSBOT_SOAK_INTERVAL` | `60` | 采样间隔（秒） |
+| `NEWSBOT_SOAK_MAX_GROWTH_MB` | `96` | 常驻内存相对预热基线的允许增量 |
+
+内存用开发依赖 `psutil` 读取 RSS（仅浸泡测试使用，运行时不依赖它）。测试会在结束时断言
+`App.stop()` 已回收浏览器运行器——这是「无僵尸浏览器进程」的判据。
+
 ## 2. 测试替身（`tests/fakes/`）
 
 | 替身 | 作用 |
@@ -76,12 +95,8 @@ python scripts/check.py --live     # 额外运行 live 测试
 | 触发 | 任务 |
 | --- | --- |
 | push 任意分支 / PR | `python scripts/check.py` |
+| PR / 打 tag | 构建 `docker/Dockerfile` 镜像（`image` job，不推送），确保容器产物真的构建得起来 |
 | 每日 03:00 定时 | `python scripts/check.py --live`（使用仓库 Secrets；未配置密钥时自动跳过） |
-| 打 tag | 全量检查 + 构建 Docker 镜像（随 T9.1 落地） |
+| 打 tag | 全量检查 + 构建 Docker 镜像 |
 
-CI 的 job 名为 `check`，分支保护里选择该检查名。
-
-CI 失败时：
-
-- 发生在功能分支：由该分支开发者 / 代理修复后再推送。
-- 发生在 `main` 或每日定时任务：视为 bug，按 [06-git-workflow.md](06-git-workflow.md) 第 4 节开 `fix/` 分支并提 PR.
+CI 的 job 名为 `check` 与 `image`，分支保护里选择 `check` 作为必需检查。
