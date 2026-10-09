@@ -9,11 +9,11 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T0.1 | 仓库初始化 | `.gitignore`、`.gitattributes`(LF)、`.editorconfig`、远程 `origin` | 首次推送 `main` 成功；`.env`、`data/` 被忽略 | — |
-| [ ] | T0.2 | Python 工程 | `pyproject.toml`、`src/newsbot/__init__.py`、`.env.example`、`config.example.yaml` | `uv sync` 成功；`ruff`、`mypy`、`pytest` 均可运行 | T0.1 |
-| [ ] | T0.3 | 规则检查脚本 | `scripts/check.py` | 能检测：行数(>700 警告 / >1400 失败)、模块头注释、目录白名单、禁用文件名、import 方向、疑似密钥；串联 ruff/mypy/pytest；自身有单元测试 | T0.2 |
-| [ ] | T0.4 | Git hooks | `scripts/hooks/pre-commit`、`scripts/hooks/commit-msg` | pre-commit 跑 `check.py --fast`；commit-msg 校验提交格式（见 06） | T0.3 |
-| [ ] | T0.5 | CI | `.github/workflows/ci.yml` | PR 与 push 触发 `check.py`；失败阻止合并 | T0.3 |
+| [x] | T0.1 | 仓库初始化 | `.gitignore`、`.gitattributes`(LF)、`.editorconfig`、远程 `origin` | 首次推送 `main` 成功；`.env`、`data/` 被忽略 | — |
+| [x] | T0.2 | Python 工程 | `pyproject.toml`、`src/newsbot/__init__.py`、`.env.example`、`config.example.yaml` | `uv sync` 成功；`ruff`、`mypy`、`pytest` 均可运行 | T0.1 |
+| [x] | T0.3 | 规则检查脚本 | `scripts/check.py` | 能检测：行数(>700 警告 / >1400 失败)、模块头注释、目录白名单、禁用文件名、import 方向、疑似密钥；串联 ruff/mypy/pytest；自身有单元测试 | T0.2 |
+| [x] | T0.4 | Git hooks | `scripts/hooks/pre-commit`、`scripts/hooks/commit-msg` | pre-commit 跑 `check.py --fast`；commit-msg 校验提交格式（见 06） | T0.3 |
+| [x] | T0.5 | CI | `.github/workflows/ci.yml` | PR 与 push 触发 `check.py`；失败阻止合并 | T0.3 |
 
 ## M1 核心层　分支 `feat/m1-core`　tag `v0.1.0`
 
@@ -111,3 +111,4 @@
 
 | 日期 | 代理 | 完成任务 | 分支 / PR | 测试结果 | 遗留问题 |
 | --- | --- | --- | --- | --- | --- |
+| 2026-10-09 | Copilot | T0.1–T0.5 | `feat/m0-bootstrap` | `check.py` 全量通过（19 个测试） | 微信 / QQ 凭证需人工申请；`main` 分支保护与 CI 检查名待你在网页端确认 |

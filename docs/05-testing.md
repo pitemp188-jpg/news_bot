@@ -58,10 +58,12 @@ python scripts/check.py --live     # 额外运行 live 测试
 | 触发 | 任务 |
 | --- | --- |
 | push 任意分支 / PR | `python scripts/check.py` |
-| 每日 03:00 定时 | `python scripts/check.py --live`（使用仓库 Secrets） |
-| 打 tag | 全量检查 + 构建 Docker 镜像 |
+| 每日 03:00 定时 | `python scripts/check.py --live`（使用仓库 Secrets；未配置密钥时自动跳过） |
+| 打 tag | 全量检查 + 构建 Docker 镜像（随 T9.1 落地） |
+
+CI 的 job 名为 `check`，分支保护里选择该检查名。
 
 CI 失败时：
 
 - 发生在功能分支：由该分支开发者 / 代理修复后再推送。
-- 发生在 `main` 或每日定时任务：视为 bug，按 [06-git-workflow.md](06-git-workflow.md) 第 4 节开 `fix/` 分支并提 PR。
+- 发生在 `main` 或每日定时任务：视为 bug，按 [06-git-workflow.md](06-git-workflow.md) 第 4 节开 `fix/` 分支并提 PR.

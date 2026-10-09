@@ -1,0 +1,32 @@
+# 复制为 config.yaml 后按需修改。非敏感配置放这里，密钥放 .env
+app:
+  timezone: Asia/Shanghai
+  log_level: INFO
+
+queue:
+  concurrency: 2 # 同时执行的任务数
+  browser_concurrency: 1 # 浏览器子任务并发
+  task_timeout_seconds: 600
+  max_attempts: 2
+  retry_delay_seconds: 5
+
+schedule:
+  default_time: "21:00" # 未指定时间的订阅默认推送时间
+  default_topics:
+    - AI
+  dedup_days: 7 # 与近 N 天已推送内容去重
+
+agent:
+  max_steps: 12 # 规划循环最大步数
+  max_tokens: 60000 # 单任务 token 预算
+  fetch_max_bytes: 2000000
+  search_results: 8
+
+delivery:
+  chunk_delay_seconds: 1.5 # 分段发送间隔
+  max_attempts: 3
+  fallback_platform: qqbot # 主通道失败时的备用通道
+
+api:
+  host: 127.0.0.1
+  port: 8765

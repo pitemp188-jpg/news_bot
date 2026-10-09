@@ -62,7 +62,22 @@ flowchart LR
 
 PR 必须使用 [.github/pull_request_template.md](../.github/pull_request_template.md)，bug 类 PR 必须填写：问题现象、问题原因、修复方式、注意事项、回归测试。
 
-## 5. 常用命令
+## 5. 本地 Git 钩子
+
+钩子位于 `scripts/hooks/`，克隆仓库后执行一次即可启用：
+
+```powershell
+git config core.hooksPath scripts/hooks
+```
+
+| 钩子 | 作用 |
+| --- | --- |
+| `pre-commit` | 执行 `scripts/check.py --fast`，未通过则拒绝提交 |
+| `commit-msg` | 校验提交信息格式；fix 类必须含问题原因 / 修复方式 / 注意事项 |
+
+需要临时绕过时用 `git commit --no-verify`，但 [第 6 节](#6-禁止事项) 禁止在正常开发中使用。
+
+## 6. 常用命令
 
 ```powershell
 # 任务完成
@@ -77,7 +92,7 @@ gh pr merge --auto --merge
 git switch main; git pull; git switch -c fix/weixin-split
 ```
 
-## 6. 禁止事项
+## 7. 禁止事项
 
 - `git push --force` 到共享分支、`git reset --hard` 丢弃他人改动
 - `--no-verify` 跳过 hooks
