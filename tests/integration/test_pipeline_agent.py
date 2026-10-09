@@ -34,9 +34,11 @@ class RecordingSender:
     def __init__(self, ok: bool = True) -> None:
         self.ok = ok
         self.sent: list[tuple[str, str, str]] = []
+        self.report_ids: list[int | None] = []
 
-    async def send(self, *, platform: str, chat_id: str, text: str) -> bool:
+    async def send(self, *, platform: str, chat_id: str, text: str, report_id: int | None = None) -> bool:
         self.sent.append((platform, chat_id, text))
+        self.report_ids.append(report_id)
         return self.ok
 
 

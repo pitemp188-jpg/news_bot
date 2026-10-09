@@ -33,8 +33,8 @@
 | [ ] | T2.2 | 适配器基类 | `gateway/base.py`、`tests/fakes/adapter.py` | 按 08 第 4.2 节契约实现；`split_text` 保持代码块完整；去重 TTL 生效；FakeAdapter 可收发 | T2.1 |
 | [ ] | T2.3 | QQ 适配器 | `gateway/qqbot.py`、`tests/fakes/qq_gateway.py` | token 提前刷新；Hello→Identify→READY→心跳→断线 Resume；08 第 3.3 节全部关闭码分支有测试；`live` 测试确认主动消息额度 | T2.2 |
 | [ ] | T2.4 | 微信适配器 | `gateway/weixin.py`、`login` 子命令 | 扫码登录；游标与 context_token 持久化到 `data/weixin/`；-14 / -2 / 限流熔断分支有测试；`live` 测试手动通过 | T2.2 |
-| [ ] | T2.5 | 鉴权 | `gateway/auth.py` | 白名单 + 配对码；未授权消息忽略并记录 | T2.2 |
-| [ ] | T2.6 | 路由与投递 | `gateway/router.py` | 入站→鉴权→指令/任务；出站分段、重试 3 次、写 `delivery` 表；`need_user` 时记 `waiting_user` 并在用户下次发消息时补投；主通道失败切备用通道 | T2.5 |
+| [x] | T2.5 | 鉴权 | `gateway/auth.py` | 白名单 + 配对码；未授权消息忽略并记录 | T2.2 |
+| [x] | T2.6 | 路由与投递 | `gateway/router.py` | 入站→鉴权→指令/任务；出站分段、重试 3 次、写 `delivery` 表；`need_user` 时记 `waiting_user` 并在用户下次发消息时补投；主通道失败切备用通道 | T2.5 |
 
 ## M3 任务调度中心　分支 `feat/m3-dispatcher`　tag `v0.3.0`
 
@@ -114,3 +114,4 @@
 | --- | --- | --- | --- | --- | --- |
 | 2026-10-09 | Copilot | T0.1–T0.5 | `feat/m0-bootstrap` | `check.py` 全量通过（19 个测试） | 微信 / QQ 凭证需人工申请；`main` 分支保护与 CI 检查名待你在网页端确认 |
 | 2026-10-09 | Copilot | T4.1–T4.5、T5.1–T5.2 | `feat/m4-agent`(#4)、`feat/m5-result` | `check.py` 全量通过；集成测试打通队列→Agent→抓取→成稿→投递；已用内置浏览器打开 `tests/fixtures/pages/article.html`，正文渲染正常、脚本未混入 | 微信 / QQ 凭证需人工申请；browser-use 为可选依赖，未安装时 browse 返回安装提示 |
+| 2026-10-09 | Copilot | T2.1–T2.6 | `feat/m2-gateway` | `check.py` 全量通过（290 个测试）；集成测试覆盖入站→鉴权→队列→Agent 抓取→成稿→投递与 waiting_user 补投；用真实分段逻辑验证长日报切分不超平台上限 | 微信 / QQ 真实凭证与 live 测试仍待人工执行 |

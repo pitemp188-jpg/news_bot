@@ -38,7 +38,9 @@ async def test_wal_mode_enabled(tmp_path: Path) -> None:
     try:
         async with db.session() as session:
             mode = str((await session.execute(text("PRAGMA journal_mode"))).scalar_one())
+            busy = int((await session.execute(text("PRAGMA busy_timeout"))).scalar_one())
         assert mode.lower() == "wal"
+        assert busy >= 1000
     finally:
         await db.dispose()
     assert (tmp_path / "wal.db").exists()

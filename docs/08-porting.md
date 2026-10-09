@@ -173,7 +173,8 @@ def split_text(text: str, limit: int) -> list[str]: ...  # 移植自 truncate_me
 
 | 源文件 | 上游 commit | 目标文件 | 协议 / 接入方式 | 新增依赖 | 删改要点 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `gateway/platforms/event.py`、`base.py`、`helpers.py` | main@908e4a4 | `gateway/base.py` | — | — | 见 4.1 | 已调研，待移植 |
-| `gateway/platforms/weixin.py` | main@908e4a4 | `gateway/weixin.py` | 腾讯 iLink Bot API，HTTP 长轮询 | httpx、qrcode | 见 4.1 | 已调研，待移植 |
-| `gateway/platforms/qqbot/adapter.py`、`constants.py` | main@908e4a4 | `gateway/qqbot.py` | QQ Bot API v2，WebSocket + REST | httpx、websockets | 见 4.1 | 已调研，待移植 |
-| `gateway/pairing.py`、`platforms/access_policy_mixin.py` | main@908e4a4 | `gateway/auth.py` | — | — | 仅参考思路 | 已调研，待编写 |
+| `gateway/platforms/event.py`、`base.py`、`helpers.py` | main@908e4a4 | `gateway/base.py` | — | — | 见 4.1 | 已移植 |
+| `gateway/platforms/weixin.py` | main@908e4a4 | `gateway/weixin.py` | 腾讯 iLink Bot API，HTTP 长轮询 | httpx | 见 4.1 | 已移植 |
+| `gateway/platforms/qqbot/adapter.py`、`constants.py` | main@908e4a4 | `gateway/qqbot.py` | QQ Bot API v2，WebSocket + REST | httpx、websockets | 见 4.1 | 已移植 |
+| `gateway/pairing.py`、`platforms/access_policy_mixin.py` | main@908e4a4 | `gateway/auth.py` | — | — | 仅参考思路 | 已编写 |
+| `gateway/delivery.py` | main@908e4a4 | `gateway/router.py` | — | — | 重写，新增 waiting_user 补投递 | 已编写 |

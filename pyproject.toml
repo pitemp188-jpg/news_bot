@@ -17,6 +17,7 @@ dependencies = [
     "httpx>=0.27",
     "openai>=1.40",
     "trafilatura>=1.8",
+    "websockets>=12.0",
 ]
 
 [dependency-groups]
@@ -86,7 +87,8 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
-addopts = '-q --strict-markers -m "not live and not soak"'
+# 单元测试镜像源码结构，不同目录下会出现同名测试文件
+addopts = '-q --strict-markers --import-mode=importlib -m "not live and not soak"'
 markers = [
     "integration: 需要真实 SQLite / 本地网页 / 多模块协作",
     "e2e: 全链路，含真实浏览器",

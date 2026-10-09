@@ -40,9 +40,9 @@ class Reporter(Protocol):
 
 
 class Sender(Protocol):
-    """投递：由 app 注入网关实现。"""
+    """投递：由 app 注入网关实现；report_id 用于关联 delivery 记录。"""
 
-    async def send(self, *, platform: str, chat_id: str, text: str) -> bool: ...
+    async def send(self, *, platform: str, chat_id: str, text: str, report_id: int | None = None) -> bool: ...
 
 
 class Pipeline:
@@ -70,13 +70,16 @@ class Pipeline:
         built = await self._reporter.build(task, findings)
         content = built.content
 
+        # 先提交报告拿到 id：投递是网络 IO，不能持有写事务，否则会与投递记录的写入互相等锁
+        report = Report(task_id=task.id, content=content, sources=list(built.sources))
+        session.add(report)
+        await session.commit()
+
         if task.platform and task.chat_id:
-            await self._deliver(task, content)
+            await self._deliver(task, content, report.id)
         else:
             logger.info("任务 #%d 无投递目标，仅生成报告", task.id)
 
-        session.add(Report(task_id=task.id, content=content, sources=list(built.sources)))
-        await session.commit()
         if task.platform and task.chat_id:
             await self._sessions.append(task.platform, task.chat_id, user_text=task.query, reply_text=content)
         return content
@@ -86,11 +89,11 @@ class Pipeline:
             return []
         return await self._sessions.load(task.platform, task.chat_id)
 
-    async def _deliver(self, task: Task, content: str) -> None:
+    async def _deliver(self, task: Task, content: str, report_id: int | None) -> None:
         if self._sender is None:
             raise RetriableError("投递组件未就绪")
         assert task.platform is not None and task.chat_id is not None
-        sent = await self._sender.send(platform=task.platform, chat_id=task.chat_id, text=content)
+        sent = await self._sender.send(platform=task.platform, chat_id=task.chat_id, text=content, report_id=report_id)
         if not sent:
             raise RetriableError(f"投递失败: {task.platform}/{task.chat_id}")
 
