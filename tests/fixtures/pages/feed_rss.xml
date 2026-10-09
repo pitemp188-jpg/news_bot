@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 模块: tests/fixtures/pages/feed_rss.xml
+     职责: RSS 2.0 夹具——供订阅源解析器做离线测试（含 CDATA、实体、推广尾巴、样板摘要、跟踪参数）
+     来源: 按 2026-10 实测的各源结构精简构造 -->
+<rss version="2.0">
+  <channel>
+    <title>示例订阅源</title>
+    <item>
+      <title><![CDATA[超强厄尔尼诺已经形成]]></title>
+      <link>https://www.solidot.org/story?sid=85569</link>
+      <pubDate>Thu, 09 Oct 2026 14:59:11 +0800</pubDate>
+      <description><![CDATA[国家气候中心表示，一次东部型超强厄尔尼诺事件已于今年 9 月正式形成，预计将持续增强。]]></description>
+    </item>
+    <item>
+      <title>带推广尾巴的条目</title>
+      <link>https://www.ifanr.com/1683999?utm_source=rss&amp;utm_medium=rss</link>
+      <pubDate>Thu, 09 Oct 2026 10:44:32 +0800</pubDate>
+      <description>&lt;p&gt;MAKE 溜背 GREAT AGAIN。&lt;/p&gt; #欢迎关注爱范儿官方微信公众号：爱范儿（微信号：ifanr），更多精彩内容第一时间为您奉上。</description>
+    </item>
+    <item>
+      <title>只有样板的摘要</title>
+      <link>https://www.infoq.cn/article/abc123</link>
+      <pubDate>Thu, 09 Oct 2026 17:53:58 +0800</pubDate>
+      <description>&lt;div align='right'&gt;&lt;a href='https://www.infoq.cn/article/abc123?utm_source=rss'&gt;点击查看原文&gt;&lt;/a&gt;&lt;/div&gt;</description>
+    </item>
+    <item>
+      <title>没有日期的条目</title>
+      <link>https://techcrunch.com/2026/10/09/no-date-item/</link>
+      <description>"When we are drawn into even the most primitive exchanges with a relational artifact, we believe it cares for us," a researcher writes.</description>
+    </item>
+    <item>
+      <title>坏日期的条目</title>
+      <link>https://example.com/bad-date</link>
+      <pubDate>不是一个合法日期</pubDate>
+      <description>这条的日期解析不了，但仍应保留，只是排序时排在最后。</description>
+    </item>
+    <item>
+      <title>缺链接的条目</title>
+      <description>没有 link 标签，必须被跳过，否则会产生空来源。</description>
+    </item>
+    <item>
+      <title>重复链接的条目</title>
+      <link>https://www.solidot.org/story?sid=85569</link>
+      <pubDate>Thu, 09 Oct 2026 15:30:00 +0800</pubDate>
+      <description>与第一条指向同一文章，去重后只应保留一条。</description>
+    </item>
+  </channel>
+</rss>

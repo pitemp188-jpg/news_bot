@@ -1,0 +1,63 @@
+<!-- 模块: tests/fixtures/pages/bing_results.html
+     职责: Bing 结果页夹具——供内置 Bing 搜索解析器做离线测试（含跳转链接、HTML 实体、干扰块）
+     来源: 按 2026-10 实测的 Bing 结果页结构精简构造，只保留解析器依赖的部分 -->
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>AI 芯片 - 搜索</title>
+  </head>
+  <body>
+    <ol id="b_results">
+      <!-- 干扰块：不含 b_algo，解析器必须忽略 -->
+      <li class="b_ans">
+        <h2><a href="https://www.bing.com/ignored">这个块不该被采集</a></h2>
+        <p>答案是……</p>
+      </li>
+
+      <li class="b_algo">
+        <h2><a href="https://example.com/news/ai-chip-1">国产 AI 芯片进展：新一代训练卡量产</a></h2>
+        <div class="b_caption">
+          <p>2026年8月19日&ensp;&#0183;&ensp;新一代训练卡已在两座晶圆厂量产，单卡算力较上代提升明显。</p>
+        </div>
+      </li>
+
+      <li class="b_algo">
+        <h2><a href="https://example.com/news/ai-chip-2"><strong>AI</strong> 芯片供应链最新动态</a></h2>
+        <div class="b_caption">
+          <p>封测产能吃紧 &amp; 交期延长，多家厂商上调报价。</p>
+        </div>
+      </li>
+
+      <!-- 重复链接：解析器必须去重 -->
+      <li class="b_algo">
+        <h2><a href="https://example.com/news/ai-chip-1">同一篇文章的第二次出现</a></h2>
+        <p>重复内容。</p>
+      </li>
+
+      <!-- 跳转包装：解析器必须还原成真实地址 -->
+      <li class="b_algo">
+        <h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc123&amp;u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS93cmFwcGVkLWFydGljbGU&amp;ntb=1">被包装成跳转的结果</a></h2>
+        <p>这个链接要还原成 https://example.com/wrapped-article 。</p>
+      </li>
+
+      <!-- 非法跳转：无法还原时应原样保留，不能抛错 -->
+      <li class="b_algo">
+        <h2><a href="https://www.bing.com/ck/a?p=no-u-param">没有 u 参数的跳转</a></h2>
+        <p>应当保留原地址。</p>
+      </li>
+
+      <!-- 缺标题的结果：用链接兜底 -->
+      <li class="b_algo">
+        <a href="https://example.com/news/no-title">占位</a>
+        <p>这一条没有 h2 标题。</p>
+      </li>
+
+      <!-- 非 http 链接：解析器必须跳过 -->
+      <li class="b_algo">
+        <h2><a href="/relative/path">相对路径链接</a></h2>
+        <p>应当被跳过。</p>
+      </li>
+    </ol>
+  </body>
+</html>
