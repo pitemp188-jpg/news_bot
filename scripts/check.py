@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
 import subprocess
 import sys
@@ -209,6 +210,27 @@ def run_step(name: str, args: list[str]) -> bool:
     return subprocess.run([sys.executable, *args], cwd=ROOT).returncode == 0
 
 
+def web_steps(fast: bool) -> list[tuple[str, list[str], str]]:
+    """前端检查：装了 node_modules 才跑，未安装依赖时跳过而不是报错。"""
+    web = ROOT / "web"
+    if not (web / "package.json").exists():
+        return []
+    if not (web / "node_modules").exists():
+        print("\n[web] 未安装依赖，跳过前端检查（在 web/ 下执行 npm install 后生效）")
+        return []
+    npm = "npm.cmd" if os.name == "nt" else "npm"
+    steps: list[tuple[str, list[str], str]] = [("npm run lint", [npm, "run", "lint"], str(web))]
+    if not fast:
+        steps.append(("npm run build", [npm, "run", "build"], str(web)))
+    steps.append(("npm run test", [npm, "run", "test"], str(web)))
+    return steps
+
+
+def run_web_step(name: str, command: list[str], cwd: str) -> bool:
+    print(f"\n=== {name} ===")
+    return subprocess.run(command, cwd=cwd, shell=False).returncode == 0
+
+
 def quality_steps(fast: bool, live: bool) -> list[tuple[str, list[str]]]:
     pytest_args = ["-m", "pytest"]
     if fast:
@@ -245,6 +267,10 @@ def main(argv: list[str] | None = None) -> int:
 
     for name, step_args in quality_steps(args.fast, args.live):
         if not run_step(name, step_args):
+            print(f"\n检查失败: {name}")
+            return 1
+    for name, command, cwd in web_steps(args.fast):
+        if not run_web_step(name, command, cwd):
             print(f"\n检查失败: {name}")
             return 1
     print("\n全部检查通过")

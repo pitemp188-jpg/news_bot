@@ -67,10 +67,10 @@ news_bot/
 │           ├── news.py
 │           └── system.py
 ├── web/                         # 管理界面
-│   ├── package.json / vite.config.ts / tsconfig.json
+│   ├── package.json / vite.config.ts / tsconfig.json / eslint.config.js
 │   └── src/
-│       ├── main.ts / App.vue / router.ts
-│       ├── api/                 # 唯一允许发 HTTP 请求的目录
+│       ├── main.ts / App.vue / router.ts / styles.css
+│       ├── api/                 # 唯一允许发 HTTP 请求的目录（client.ts、format.ts）
 │       ├── views/               # 页面，一页一个文件
 │       └── components/          # 复用组件
 ├── tests/

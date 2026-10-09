@@ -12,6 +12,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from tests.unit.api.conftest import ADMIN_PASSWORD
 
+from newsbot.api import server as server_module
 from newsbot.api.security import COOKIE_CSRF, COOKIE_SESSION
 from newsbot.api.server import create_app
 from newsbot.app import App
@@ -79,11 +80,33 @@ async def test_logout_revokes_session(api) -> None:
     assert (await api.get("/api/tasks")).status_code == 401
 
 
-async def test_index_falls_back_when_web_not_built(api) -> None:
-    # 测试环境没有 web/dist，应给出可操作的提示而不是 500
+async def test_root_serves_web_when_built(api) -> None:
+    """前端构建产物存在时，根路径直接返回页面。"""
+    if not server_module.WEB_DIST.exists():
+        pytest.skip("未执行 npm run build，跳过静态托管用例")
     response = await api.get("/")
     assert response.status_code == 200
+    assert '<div id="app">' in response.text
+
+
+async def test_index_falls_back_when_web_not_built(api, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 指向不存在的目录，模拟「还没 npm run build」，应给出可操作提示而不是 500
+    monkeypatch.setattr(server_module, "WEB_DIST", tmp_path / "missing")
+    api_app = create_app(api.config, api.app)
+    transport = ASGITransport(app=api_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/")
+    assert response.status_code == 200
     assert "npm" in response.json()["detail"]
+
+
+async def test_spa_fallback_serves_index_for_unknown_path(api) -> None:
+    """前端路由的深链接要回退到 index.html，而不是 404。"""
+    if not server_module.WEB_DIST.exists():
+        pytest.skip("未执行 npm run build，跳过 SPA 回退用例")
+    response = await api.get("/schedules")
+    assert response.status_code == 200
+    assert '<div id="app">' in response.text
 
 
 async def test_missing_admin_password_is_rejected(tmp_path: Path) -> None:
