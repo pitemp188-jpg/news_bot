@@ -21,6 +21,7 @@ dependencies = [
 dev = [
     "ruff>=0.6",
     "mypy>=1.11",
+    "types-PyYAML>=6.0",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
@@ -43,7 +44,7 @@ line-length = 120
 target-version = "py312"
 src = ["src", "tests"]
 # docs 是中文文档，其中的 Python 片段是契约示意，不参与格式化
-extend-exclude = ["docs"]
+extend-exclude = ["docs", "migrations"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
