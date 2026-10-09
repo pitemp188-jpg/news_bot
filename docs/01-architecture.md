@@ -76,7 +76,7 @@ flowchart TD
 
 ### 4.2 执行流水线
 
-`dispatcher/pipeline.py`：`agent.runner.run()` → `result.dedup.filter()` → `result.report.build()` → `Sender.send()`。
+`dispatcher/pipeline.py`：`agent.runner.run()` → 去重（对比近 N 天指纹，剔除重复来源）→ `result.report.build()` → 落库 `report` 与新来源（写 `news_item`）→ `Sender.send()`。
 `Sender` 由 `app.py` 启动时注入（实际实现为 `gateway.router.send`），dispatcher 不直接 import gateway。
 
 ## 5. 场景时序
