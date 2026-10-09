@@ -72,6 +72,7 @@ no_implicit_reexport = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = '-q --strict-markers -m "not live and not soak"'
 markers = [

@@ -19,10 +19,10 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T1.1 | 配置 | `core/config.py` | pydantic-settings 读取 `.env` + `config.yaml`；缺必填项启动报错 | M0 |
-| [ ] | T1.2 | 日志 | `core/log.py` | 结构化日志、trace id、密钥脱敏、按天轮转到 `data/logs` | T1.1 |
-| [ ] | T1.3 | 数据库 | `core/db.py`、`core/models.py`、`migrations/` | 01 文档全部表建好；Alembic 首个迁移可升级/回滚 | T1.1 |
-| [ ] | T1.4 | 错误与 LLM | `core/errors.py`、`core/llm.py` | OpenAI 兼容调用、tool-calling、重试、token 记录到 `llm_usage` | T1.3 |
+| [x] | T1.1 | 配置 | `core/config.py` | pydantic-settings 读取 `.env` + `config.yaml`；缺必填项启动报错 | M0 |
+| [x] | T1.2 | 日志 | `core/log.py` | 结构化日志、trace id、密钥脱敏、按天轮转到 `data/logs` | T1.1 |
+| [x] | T1.3 | 数据库 | `core/db.py`、`core/models.py`、`migrations/` | 01 文档全部表建好；Alembic 首个迁移可升级/回滚 | T1.1 |
+| [x] | T1.4 | 错误与 LLM | `core/errors.py`、`core/llm.py` | OpenAI 兼容调用、tool-calling、重试、token 记录到 `llm_usage` | T1.3 |
 
 ## M2 消息网关（移植 hermes）　分支 `feat/m2-gateway`　tag `v0.2.0`
 

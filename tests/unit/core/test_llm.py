@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -140,3 +141,28 @@ async def test_fake_llm_returns_scripted_replies() -> None:
     assert len(fake.calls) == 3
     await fake.aclose()
     assert fake.closed
+
+
+async def test_record_usage_persists_tokens(tmp_path: Path) -> None:
+    from sqlalchemy import func, select
+
+    from newsbot.core.db import Database
+    from newsbot.core.llm import LLMReply, record_usage
+    from newsbot.core.models import LlmUsage, Task
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'usage.db'}")
+    await db.init()
+    try:
+        async with db.session() as session:
+            task = Task(kind="chat", query="q")
+            session.add(task)
+            await session.commit()
+            await record_usage(session, LLMReply(prompt_tokens=7, completion_tokens=5), task_id=task.id, model="m")
+        async with db.session() as session:
+            total = (await session.execute(select(func.count()).select_from(LlmUsage))).scalar_one()
+            row = (await session.execute(select(LlmUsage))).scalar_one()
+        assert total == 1
+        assert (row.prompt_tokens, row.completion_tokens) == (7, 5)
+        assert row.task_id is not None
+    finally:
+        await db.dispose()

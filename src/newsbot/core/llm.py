@@ -20,10 +20,12 @@ from openai import (
     OpenAIError,
     RateLimitError,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from newsbot.core.config import Secrets
 from newsbot.core.errors import AuthError, FatalError, NewsbotError, RetriableError
 from newsbot.core.log import get_logger
+from newsbot.core.models import LlmUsage
 
 logger = get_logger(__name__)
 
@@ -142,3 +144,16 @@ class OpenAIClient:
         close = getattr(self._client, "close", None)
         if callable(close):
             await close()
+
+
+async def record_usage(session: AsyncSession, reply: LLMReply, *, task_id: int | None = None, model: str = "") -> None:
+    """把一次模型调用的用量写入 llm_usage，供成本统计与预算控制。"""
+    session.add(
+        LlmUsage(
+            task_id=task_id,
+            model=model,
+            prompt_tokens=reply.prompt_tokens,
+            completion_tokens=reply.completion_tokens,
+        )
+    )
+    await session.commit()
