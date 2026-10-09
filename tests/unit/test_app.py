@@ -53,6 +53,25 @@ async def _drain(app: App, timeout: float = 5.0) -> None:
     raise AssertionError("任务未在超时时间内结束")
 
 
+async def test_start_creates_missing_data_dir(tmp_path: Path) -> None:
+    # 干净机器上首次部署时 data_dir 不存在；SQLite 不会创建父目录，
+    # 过去只会抛出一句 unable to open database file（验收日报时实测踩到）
+    missing = tmp_path / "fresh" / "data"
+    assert not missing.exists()
+
+    config = Config(
+        secrets=Secrets(_env_file=None, llm_api_key="sk-test"),
+        data_dir=missing,
+    )
+    app = App(config, llm=FakeLLM(replies=[reply("结果 [1]")]), adapters=[FakeAdapter(platform="weixin")])
+    try:
+        await app.start()
+        assert missing.is_dir(), "启动时应自动创建数据目录"
+        assert (missing / "newsbot.db").exists(), "数据库应落在新建目录里"
+    finally:
+        await app.stop()
+
+
 async def test_start_registers_adapters_and_stops(tmp_path: Path) -> None:
     app, adapter = await _app(tmp_path)
     try:
