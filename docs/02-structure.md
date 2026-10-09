@@ -48,6 +48,7 @@ news_bot/
 │   │   ├── runner.py            # 规划循环
 │   │   ├── prompts.py           # Agent 提示词
 │   │   └── tools/
+│   │       ├── base.py          # Tool 协议与 Source / ToolResult 类型
 │   │       ├── search.py
 │   │       ├── fetch.py
 │   │       ├── browser.py

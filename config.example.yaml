@@ -5,7 +5,6 @@ app:
 
 queue:
   concurrency: 2 # 同时执行的任务数
-  browser_concurrency: 1 # 浏览器子任务并发
   task_timeout_seconds: 600
   max_attempts: 2
   retry_delay_seconds: 5
@@ -21,6 +20,7 @@ agent:
   max_tokens: 60000 # 单任务 token 预算
   fetch_max_bytes: 2000000
   search_results: 8
+  browser_concurrency: 1 # 浏览器子任务并发
 
 delivery:
   chunk_delay_seconds: 1.5 # 分段发送间隔
