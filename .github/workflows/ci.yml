@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
   pull_request:
   schedule:
     - cron: "0 19 * * *" # 每日 03:00（Asia/Shanghai）跑一次 live 测试
@@ -37,3 +38,23 @@ jobs:
             exit 0
           fi
           uv run python scripts/check.py --live
+
+  # 本地开发机不一定装 Docker，所以在 PR 与打 tag 时真的构建一次镜像，
+  # 否则 docker/ 下的产物只有契约测试覆盖、从没被真正构建过。
+  image:
+    name: image
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建镜像（不推送）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
