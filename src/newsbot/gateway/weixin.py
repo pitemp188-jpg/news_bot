@@ -230,9 +230,14 @@ class WeixinAdapter(BaseAdapter):
     async def connect(self) -> bool:
         account = self._store.load_account()
         if account is None and self._secrets.weixin_token and self._secrets.weixin_account_id:
-            account = WeixinAccount(account_id=self._secrets.weixin_account_id, token=self._secrets.weixin_token)
+            # 平台发放的 bot 凭证（iLink Bot 控制台 / 开放平台），运行期无需任何登录
+            account = WeixinAccount(
+                account_id=self._secrets.weixin_account_id,
+                token=self._secrets.weixin_token,
+                base_url=self._secrets.weixin_base_url or ILINK_BASE_URL,
+            )
         if account is None:
-            logger.error("[weixin] 缺少凭证，请先执行 python -m newsbot login weixin")
+            logger.error("[weixin] 缺少 bot 凭证：请在 .env 填 WEIXIN_ACCOUNT_ID / WEIXIN_TOKEN（平台发放）")
             return False
         self._account = account
         self._store.restore_tokens(account.account_id)
@@ -459,13 +464,19 @@ async def qr_login(
     timeout: float = 480.0,
     on_qr: Callable[[str], None] | None = None,
     sleeper: Callable[[float], Any] = asyncio.sleep,
+    base_url: str = ILINK_BASE_URL,
 ) -> WeixinAccount | None:
-    """扫码登录：拉取二维码 → 轮询状态 → 成功后保存凭证。"""
+    """可选的凭证获取助手：向 iLink 申请 bot 二维码 → 轮询状态 → 保存平台发放的凭证。
+
+    运行期不需要它：把 WEIXIN_ACCOUNT_ID / WEIXIN_TOKEN 填进 .env 即可，本函数只在
+    需要领取 bot 凭证时用一次（等价于平台控制台的「创建机器人」流程）。
+    """
     owned = client is None
     http = client or httpx.AsyncClient(timeout=None)
     notify = on_qr or (lambda url: print(f"请使用微信扫描二维码：\n{url}"))
+    root = base_url.rstrip("/")
     try:
-        qr = await _fetch_qr(http, bot_type)
+        qr = await _fetch_qr(http, bot_type, root)
         if not qr:
             logger.error("[weixin] 获取二维码失败")
             return None
@@ -474,42 +485,42 @@ async def qr_login(
         deadline = time.monotonic() + timeout
         refreshes = 0
         while time.monotonic() < deadline:
-            status = await _qr_status(http, code)
+            status = await _qr_status(http, code, root)
             state = str(status.get("status") or "wait")
             if state == "confirmed":
                 account = WeixinAccount(
                     account_id=str(status.get("ilink_bot_id") or ""),
                     token=str(status.get("bot_token") or ""),
-                    base_url=str(status.get("baseurl") or ILINK_BASE_URL),
+                    base_url=str(status.get("baseurl") or root),
                     user_id=str(status.get("ilink_user_id") or ""),
                 )
                 if not (account.account_id and account.token):
                     logger.error("[weixin] 扫码成功但凭证不完整")
                     return None
                 store.save_account(account)
-                logger.info("[weixin] 登录成功 account=%s", safe_id(account.account_id))
+                logger.info("[weixin] 已获取 bot 凭证 account=%s", safe_id(account.account_id))
                 return account
             if state == "expired":
                 refreshes += 1
                 if refreshes > 3:
-                    logger.error("[weixin] 二维码多次过期，请重新登录")
+                    logger.error("[weixin] 二维码多次过期，请重新获取")
                     return None
-                qr = await _fetch_qr(http, bot_type)
+                qr = await _fetch_qr(http, bot_type, root)
                 if not qr:
                     return None
                 code, url = qr
                 notify(url)
             await sleeper(1.0)
-        logger.error("[weixin] 登录超时")
+        logger.error("[weixin] 获取凭证超时")
         return None
     finally:
         if owned:
             await http.aclose()
 
 
-async def _fetch_qr(http: httpx.AsyncClient, bot_type: str) -> tuple[str, str] | None:
+async def _fetch_qr(http: httpx.AsyncClient, bot_type: str, base_url: str = ILINK_BASE_URL) -> tuple[str, str] | None:
     response = await http.get(
-        f"{ILINK_BASE_URL}/{EP_GET_BOT_QR}",
+        f"{base_url.rstrip('/')}/{EP_GET_BOT_QR}",
         params={"bot_type": bot_type},
         headers=_headers(None),
         timeout=QR_TIMEOUT,
@@ -522,9 +533,9 @@ async def _fetch_qr(http: httpx.AsyncClient, bot_type: str) -> tuple[str, str] |
     return code, str(data.get("qrcode_img_content") or code)
 
 
-async def _qr_status(http: httpx.AsyncClient, code: str) -> dict[str, Any]:
+async def _qr_status(http: httpx.AsyncClient, code: str, base_url: str = ILINK_BASE_URL) -> dict[str, Any]:
     response = await http.get(
-        f"{ILINK_BASE_URL}/{EP_GET_QR_STATUS}",
+        f"{base_url.rstrip('/')}/{EP_GET_QR_STATUS}",
         params={"qrcode": code},
         headers=_headers(None),
         timeout=QR_TIMEOUT,

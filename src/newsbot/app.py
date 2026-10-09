@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -24,11 +25,11 @@ from newsbot.core.log import get_logger
 from newsbot.core.models import Schedule
 from newsbot.dispatcher.pipeline import Pipeline
 from newsbot.dispatcher.queue import TaskQueue
-from newsbot.dispatcher.scheduler import Scheduler
+from newsbot.dispatcher.scheduler import Scheduler, cron_from_time
 from newsbot.dispatcher.session import SessionStore
 from newsbot.gateway.auth import Authorizer, parse_allowed
 from newsbot.gateway.base import BaseAdapter, MessageEvent
-from newsbot.gateway.commands import Commands, cron_from_time
+from newsbot.gateway.commands import Commands
 from newsbot.gateway.qqbot import QQBotAdapter
 from newsbot.gateway.router import Router
 from newsbot.gateway.weixin import WeixinAdapter, WeixinStore
@@ -257,6 +258,31 @@ class App:
         deduper = Deduper()
         await deduper.load_recent(self.db, days)
         return deduper
+
+    # ── 运维 ──
+    async def backup(self, out: str | None = None) -> Path:
+        """用 SQLite 的 VACUUM INTO 生成一致性快照，WAL 写入中也安全。"""
+        import sqlite3
+        from datetime import datetime
+
+        config = self._config
+        target_dir = Path(out) if out else config.data_dir / "backups"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        source = config.data_dir / "newsbot.db"
+        if not source.exists():
+            raise FileNotFoundError(f"数据库不存在：{source}")
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = target_dir / f"newsbot-{stamp}.db"
+        # 走同步驱动：备份是短时操作，用 sqlite3 最直接，也避免和异步连接池抢锁
+        with sqlite3.connect(source) as conn:
+            conn.execute("VACUUM INTO ?", (str(target),))
+        logger.info("数据库快照已生成: %s", target)
+        return target
+
+
+def build_app(config: Config, **kwargs: Any) -> App:
+    """按配置组装一个（尚未启动的）应用；测试与 CLI 共用同一入口。"""
+    return App(config, **kwargs)
 
 
 async def run_service() -> int:

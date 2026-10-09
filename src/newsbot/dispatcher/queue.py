@@ -95,6 +95,37 @@ class TaskQueue:
         async with self._db.session() as session:
             return await session.get(Task, task_id)
 
+    def set_executor(self, executor: Executor) -> None:
+        """替换执行体；业务组装后再注入时用（测试也靠它制造慢任务）。"""
+        self._executor = executor
+
+    @property
+    def depth(self) -> int:
+        """排队中的任务数。"""
+        return self._pending.qsize()
+
+    @property
+    def running(self) -> int:
+        """正在执行的任务数。"""
+        return len(self._running)
+
+    async def requeue(self, task_id: int) -> bool:
+        """重跑一个已结束的任务：重置状态与计数后重新入队。"""
+        async with self._db.session() as session:
+            task = await session.get(Task, task_id)
+            if task is None or task.status in ACTIVE_STATES:
+                return False
+            task.status = "pending"
+            task.attempts = 0
+            task.error = None
+            task.started_at = None
+            task.finished_at = None
+            await session.commit()
+        self._cancelled.discard(task_id)
+        self._pending.put_nowait(task_id)
+        logger.info("任务 #%d 已重新入队", task_id)
+        return True
+
     async def _recover(self) -> list[int]:
         """把上次残留的 pending / running 任务重新排队。"""
         async with self._db.session() as session:

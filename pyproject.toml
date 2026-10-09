@@ -14,9 +14,11 @@ dependencies = [
     "aiosqlite>=0.20",
     "alembic>=1.13",
     "APScheduler>=3.10",
+    "fastapi>=0.115",
     "httpx>=0.27",
     "openai>=1.40",
     "trafilatura>=1.8",
+    "uvicorn>=0.30",
     "websockets>=12.0",
 ]
 
@@ -58,6 +60,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]
+# FastAPI 的依赖注入就是在默认值里调用 Depends，属框架惯用写法
+"src/newsbot/api/**" = ["B008"]
 
 [tool.ruff.format]
 quote-style = "double"
