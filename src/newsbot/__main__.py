@@ -137,7 +137,13 @@ async def _backup(out: str | None) -> int:
     config = _get()
     setup_logging(level=config.app.log_level, log_dir=config.log_dir)
     app = build_app(config)
-    path = await app.backup(out)
+    try:
+        path = await app.backup(out)
+    except FileNotFoundError as exc:
+        # 全新部署时数据库还没建，这是可预期的状态，给提示而不是抛堆栈
+        print(f"{exc}")
+        print("数据库还没创建。先启动一次服务（python -m newsbot run）或跑一次任务，再执行备份。")
+        return 1
     print(f"数据库快照已生成：{path}")
     return 0
 
