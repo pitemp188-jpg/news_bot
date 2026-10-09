@@ -169,6 +169,39 @@ def split_text(text: str, limit: int) -> list[str]: ...  # 移植自 truncate_me
 - **QQ**：需在 QQ 开放平台申请 AppID / Secret，开通单聊 / 群聊权限并配置沙箱或通过审核，属于人工步骤。
 - 平台凭证申请、扫码登录属于人工任务，长跑开发遇到时按 [07-autonomous-dev.md](07-autonomous-dev.md) 第 4 节停止并汇报。
 
+## 6.1 browser-use 集成实录（T11.1）
+
+browser-use 是成熟内核，但**默认配置在我们的环境里跑不起来**，以下每一条都对应一次实测失败。
+
+| 项 | 默认行为 | 问题 | 我们的做法 |
+| --- | --- | --- | --- |
+| `llm` | `None` | 它是 LLM 驱动的 Agent，不给模型无法动作 | 用 `ChatOpenAI(base_url=…)` 接我们的 OpenAI 兼容端点 |
+| 模型选择 | 随便给一个 | `deepseek-v4-flash` 单次调用 17s 且 JSON 常被截断/损坏，90s 超时频繁触发 | 单独配置 `LLM_MODEL_BROWSER`，实测 `deepseek-v4-1-flash-260910` 约 2s 且 JSON 合法 |
+| `enable_default_extensions` | `True` | 启动时联网下载 uBlock 等扩展，受限网络下 CRX 无效并把启动拖过 30s | 关掉 |
+| `use_vision` | `True` | 非视觉模型收到截图会报错，且白烧 token | 显式 `False` |
+| 浏览器会话 | 每次新建 | 启动约 4s，重复任务纯浪费 | 复用同一个 `BrowserSession`，`aclose()` 收尾 |
+| `TIMEOUT_BrowserStartEvent` | 30s | 冷启动或被残留进程占用时莫名失败，错误信息只有一串事件名 | 用环境变量对齐到 `agent.browser_timeout_seconds` |
+| 运行产物 | `~/.cache`、`~/.config` | 违反“运行时产物只写 `data/`” | 改 `XDG_CACHE_HOME`、`XDG_CONFIG_HOME`、`BROWSER_USE_CONFIG_DIR` 指向 `data/browser/` |
+| 匿名遥测 | 开启 | 受限网络里是纯粹拖慢 | `ANONYMIZED_TELEMETRY=false` |
+| 输出契约 | 无 | **会编造未被要求的字段**（详见下） | `TASK_SUFFIX` 逐条禁止 |
+
+### 为什么必须加输出契约
+
+在 `https://github.com/trending` 上实测：该页面**只公布「今日新增 star」，没有总 star 与 fork**
+（已核对原始 HTML：含 fork 的文本 0 处）。但子 Agent 主动补充了「总 star 38,744」「fork 5,834」
+等 6 个数字，其中 4 个在页面上完全不存在——而同一段输出还自称“未添加页面以外的信息”。
+
+收紧 `TASK_SUFFIX`（只报被要求的字段、数字必须逐字照抄、缺失写「页面未提供」、不许自我评价）
+之后，输出只剩被要求的 3 个数字，且**全部可在页面原文中回查**。
+`tests/live/test_live_browser.py` 把这个判据固化成断言：输出里的每个数字都必须出现在页面原文里。
+
+### 已知限制
+
+- 残留的浏览器进程会占住 profile 目录，导致后续启动被判超时。因此 `App.stop()` 必须走到
+  `runner.aclose()`（见 `fix(app): 关闭服务时回收 Agent 工具`）；调试时若强杀进程，需按命令行
+  过滤清理 `chrome.exe`，切勿误杀用户自己的浏览器。
+- 复用 `data/browser/profile` 是为将来复用登录态（如需要登录的站点）留的位置，目前尚未做登录。
+
 ## 7. 移植记录
 
 | 源文件 | 上游 commit | 目标文件 | 协议 / 接入方式 | 新增依赖 | 删改要点 | 状态 |
@@ -178,3 +211,4 @@ def split_text(text: str, limit: int) -> list[str]: ...  # 移植自 truncate_me
 | `gateway/platforms/qqbot/adapter.py`、`constants.py` | main@908e4a4 | `gateway/qqbot.py` | QQ Bot API v2，WebSocket + REST | httpx、websockets | 见 4.1 | 已移植 |
 | `gateway/pairing.py`、`platforms/access_policy_mixin.py` | main@908e4a4 | `gateway/auth.py` | — | — | 仅参考思路 | 已编写 |
 | `gateway/delivery.py` | main@908e4a4 | `gateway/router.py` | — | — | 重写，新增 waiting_user 补投递 | 已编写 |
+| `browser-use/browser-use` | 0.11.13（pip） | `agent/tools/browser.py` | pip 依赖，不拷贝源码 | browser-use（可选 extra） | 见 6.1：会话复用、跳过扩展下载、输出契约 | 已接入 |
