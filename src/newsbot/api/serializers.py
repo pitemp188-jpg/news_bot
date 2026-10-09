@@ -6,14 +6,23 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from newsbot.core.models import Delivery, NewsItem, Report, Schedule, Task
 
 
 def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
+    """转 ISO 字符串并强制带时区。
+
+    SQLite 读回来的 datetime 是不带 tzinfo 的，直接 isoformat 会让前端把 UTC
+    当成当地时间解析（实测会显示成 8 小时前）。这里对无时区的值按 UTC 补齐。
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
 
 
 def task_dict(row: Task) -> dict[str, Any]:

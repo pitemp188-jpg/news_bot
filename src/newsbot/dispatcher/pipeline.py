@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from newsbot.core.db import Database
 from newsbot.core.errors import RetriableError
 from newsbot.core.log import get_logger
-from newsbot.core.models import NewsItem, Report, Task
+from newsbot.core.models import LlmUsage, NewsItem, Report, Task
 from newsbot.dispatcher.session import SessionStore
 from newsbot.result.dedup import Deduper, Item, content_digest, simhash64, simhash_hex, url_digest
 
@@ -88,6 +88,7 @@ class Pipeline:
         """执行任务；投递失败按可重试处理，其余错误向上抛给队列分类。"""
         history = await self._history(task)
         findings = await self._runner.run(task.query, history)
+        await self._record_usage(session, task, findings)
         await self._drop_duplicates(findings)
         built = await self._reporter.build(task, findings)
         content = built.content
@@ -121,6 +122,22 @@ class Pipeline:
         sent = await self._sender.send(platform=task.platform, chat_id=task.chat_id, text=content, report_id=report_id)
         if not sent:
             raise RetriableError(f"投递失败: {task.platform}/{task.chat_id}")
+
+    async def _record_usage(self, session: AsyncSession, task: Task, findings: Any) -> None:
+        """把每次模型调用的用量写进 llm_usage，供后台成本统计。"""
+        usages = list(getattr(findings, "usages", None) or [])
+        if not usages:
+            return
+        for usage in usages:
+            session.add(
+                LlmUsage(
+                    task_id=task.id,
+                    model=str(getattr(usage, "model", "") or ""),
+                    prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+                    completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+                )
+            )
+        logger.info("任务 #%d 记录 %d 次模型调用用量", task.id, len(usages))
 
     async def _drop_duplicates(self, findings: Any) -> None:
         """与近期已推送内容比对，剔除重复来源；全是旧闻时直接说明。"""

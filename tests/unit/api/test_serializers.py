@@ -14,6 +14,25 @@ from newsbot.core.models import Delivery, NewsItem, Report, Schedule, Task
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
 
 
+def test_naive_datetime_is_treated_as_utc() -> None:
+    # SQLite 读回来没有 tzinfo；若直接 isoformat，前端会当成当地时间，
+    # 实测显示成 8 小时前，所以必须补上时区标记（回归用例）
+    row = Task(id=1, kind="chat", query="q", status="succeeded")
+    row.created_at = datetime(2026, 10, 9, 12, 0)
+    body = task_dict(row)
+    assert body["created_at"] is not None
+    assert body["created_at"].endswith("+00:00")
+    assert body["created_at"].startswith("2026-10-09T12:00:00")
+
+
+def test_aware_datetime_is_normalised_to_utc() -> None:
+    from datetime import timedelta, timezone
+
+    row = Task(id=1, kind="chat", query="q", status="succeeded")
+    row.created_at = datetime(2026, 10, 9, 20, 0, tzinfo=timezone(timedelta(hours=8)))
+    assert task_dict(row)["created_at"] == "2026-10-09T12:00:00+00:00"
+
+
 def test_task_dict_covers_all_fields() -> None:
     row = Task(id=3, kind="chat", query="问题", status="succeeded", platform="weixin", chat_id="u1", attempts=1)
     row.created_at = NOW

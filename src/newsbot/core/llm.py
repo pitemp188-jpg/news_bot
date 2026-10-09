@@ -47,6 +47,15 @@ class ToolCall:
 
 
 @dataclass
+class Usage:
+    """一次模型调用的用量，供成本统计落库。"""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    model: str = ""
+
+
+@dataclass
 class LLMReply:
     """一次模型回复。"""
 
@@ -54,6 +63,10 @@ class LLMReply:
     tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    model: str = ""
+
+    def usage(self) -> Usage:
+        return Usage(prompt_tokens=self.prompt_tokens, completion_tokens=self.completion_tokens, model=self.model)
 
 
 class LLM(Protocol):
@@ -87,6 +100,7 @@ def _to_reply(response: Any) -> LLMReply:
         tool_calls=calls,
         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
         completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        model=str(getattr(response, "model", "") or ""),
     )
 
 
