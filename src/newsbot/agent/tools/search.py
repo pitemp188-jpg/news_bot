@@ -68,6 +68,73 @@ SNIPPET_OUTPUT_CHARS = 140
 _PROMO = re.compile(r"#?\s*欢迎关注.{0,60}?(?:微信公众号|公众号|微信号)[^\n]*", re.S)
 _BOILERPLATE = re.compile(r"^(?:点击)?(?:查看|阅读)?(?:原文|详情|全文)[>》]?$")
 
+# 检索词切分：标点一律当分隔符，因为中文没有词边界
+_KEYWORD_SPLIT = re.compile(r"[，。！？、；：（）「」【】《》,\.!\?;:()\[\]\"'“”‘’]+")
+# 功能词：它们不携带检索信息，却会让"多词同时命中"这条判据永远失败。
+# 实测整句问话被当成关键词时，输出里会出现「订阅源里没有同时包含『新闻、
+# 今天、重要』的条目」——用户读到会以为什么都没搜到。
+STOPWORDS = frozenset(
+    {
+        "今天",
+        "今日",
+        "昨天",
+        "明天",
+        "最近",
+        "最新",
+        "目前",
+        "现在",
+        "重要",
+        "有哪些",
+        "哪些",
+        "什么",
+        "怎么",
+        "如何",
+        "多少",
+        "是否",
+        "请",
+        "帮我",
+        "给出",
+        "汇总",
+        "总结",
+        "整理",
+        "梳理",
+        "列出",
+        "要点",
+        "摘要",
+        "来源",
+        "链接",
+        "编号",
+        "引用",
+        "标注",
+        "说明",
+        "新闻",
+        "资讯",
+        "消息",
+        "报道",
+        "动态",
+        "相关",
+        "关于",
+        "一下",
+        "一些",
+        "一个",
+        "以及",
+        "同时",
+        "的",
+        "了",
+        "吗",
+        "呢",
+        "和",
+        "与",
+    }
+)
+# 只在词内部剥离多字功能词：单字功能词（的、和、与）会咬坏「目的地」「和平」
+# 这类真正的词，所以整片段等于它时才算功能词；片段首尾的单字功能词单独收尾处理
+_INNER_STOPWORDS = tuple(sorted((word for word in STOPWORDS if len(word) > 1), key=len, reverse=True))
+_EDGE_CHARS = "的了和与吗呢"
+# 长于这个长度的中文词按 3 字窗口切片段参与匹配：没有分词器时，「具身智能机器人
+# 产业」整串永远不可能出现在标题里，但其中「机器人」应当能命中
+LONG_WORD_CHARS = 4
+
 
 def _unwrap(url: str) -> str:
     """把 Bing 的跳转链接还原成目标地址；直链原样返回。"""
@@ -211,11 +278,44 @@ def _host(url: str) -> str:
     return match.group(1).removeprefix("www.") if match else url
 
 
+def _phrases(query: str) -> list[str]:
+    """剥掉功能词后剩下的内容词，用于判断"哪几个词没被命中"。
+
+    整句问话直接当关键词会让"今天""重要""有哪些"参与匹配：多词同时命中的判据
+    必然失败，输出里还会出现「订阅源里没有同时包含『新闻、今天、重要』的条目」，
+    让人误以为一篇都没搜到。这里先按标点切、再在片段内部剥掉多字功能词，最后
+    丢掉纯数字与单字残渣。筛完什么都不剩时退回按标点切的原片段，保证不比以前差。
+    """
+    cleaned = _KEYWORD_SPLIT.sub(" ", query)
+    parts = [part.strip() for part in cleaned.split() if part.strip()]
+    phrases: list[str] = []
+    for part in parts:
+        core = part
+        for word in _INNER_STOPWORDS:
+            core = core.replace(word, " ")
+        for chunk in core.split():
+            # 片段首尾的单字功能词（「的人工智能」）要去掉，但不碰「目的地」这类词：
+            # 只有长度大于 2 才允许裁剪，裁完至少还剩两个字
+            if len(chunk) > 2:
+                chunk = chunk.strip(_EDGE_CHARS)
+            if len(chunk) > 1 and chunk.lower() not in STOPWORDS:
+                phrases.append(chunk)
+    return phrases or [part for part in parts if len(part) > 1] or [query.strip()]
+
+
 def _keywords(query: str) -> list[str]:
-    """切关键词：中文没有词边界，所以整串与按标点空白切分后的片段都算。"""
-    cleaned = re.sub(r"[，。！？、；：（）「」【】,\.!\?;:()\[\]\"']+", " ", query)
-    parts = [part for part in cleaned.split() if part]
-    return parts or [query.strip()]
+    """打分用关键词：内容词再加上长词的 3 字窗口。
+
+    没有分词器时「具身智能机器人产业」这种整串不可能出现在任何标题里，切成窗口
+    后「机器人」「智能机」这类片段才有机会命中。窗口只用于打分排序，不用于判断
+    哪个词没命中——否则提示语会被一堆无意义片段淹没。
+    """
+    words: list[str] = []
+    for phrase in _phrases(query):
+        words.append(phrase)
+        if len(phrase) > LONG_WORD_CHARS and phrase.isascii() is False:
+            words.extend(phrase[index : index + 3] for index in range(len(phrase) - 2))
+    return words
 
 
 def _score(item: dict[str, str], query: str, keywords: list[str]) -> int:
@@ -247,6 +347,7 @@ def match_feed_items(items: list[dict[str, str]], query: str, limit: int) -> tup
     （实测「AI 芯片」在没有芯片新闻时只能命中「AI」），不说明就会让用户误以为
     结果全都是关于该话题的。
     """
+    phrases = _phrases(query)
     keywords = [word.lower() for word in _keywords(query) if word.strip()]
     scored = [(item, _score(item, query, keywords)) for item in items]
     matched = [(item, score) for item, score in scored if score > 0]
@@ -265,9 +366,11 @@ def match_feed_items(items: list[dict[str, str]], query: str, limit: int) -> tup
 
     if not matched:
         return unique, "订阅源里没有匹配该关键词的条目，以下是各源最新内容："
-    hit_words = {word for word in keywords if any(word in (i["title"] + i["snippet"]).lower() for i, _ in matched)}
-    missing = [word for word in keywords if word not in hit_words]
-    if missing and len(keywords) > 1:
+    hit_words = {
+        word for word in phrases if any(word.lower() in (i["title"] + i["snippet"]).lower() for i, _ in matched)
+    }
+    missing = [word for word in phrases if word not in hit_words]
+    if missing and len(phrases) > 1:
         return unique, f"订阅源里没有同时包含「{'、'.join(missing)}」的条目，以下是只匹配到其余关键词的内容："
     return unique, ""
 
@@ -280,7 +383,10 @@ class SearchTool:
     parameters: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "搜索关键词"},
+            "query": {
+                "type": "string",
+                "description": "检索关键词，2～5 个词（例如「具身智能 融资」）；不要传整句问话，也不要用「今天/重要/有哪些」这类无检索价值的词",
+            },
             "time_range": {
                 "type": "string",
                 "enum": ["day", "week", "month"],

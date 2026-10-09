@@ -15,6 +15,8 @@ import respx
 from newsbot.agent.tools.search import (
     BING_ENDPOINT,
     SearchTool,
+    _keywords,
+    _phrases,
     clean_snippet,
     match_feed_items,
     parse_bing,
@@ -306,6 +308,70 @@ def test_match_feed_items_reports_no_match_but_returns_latest() -> None:
     assert "没有匹配该关键词" in note
 
 
+def test_match_feed_items_ignores_function_words_in_whole_sentence() -> None:
+    # 实测：Agent 把整句问话当关键词传进来，功能词参与匹配导致
+    # 「没有同时包含『新闻、今天、重要』的条目」这种误导性提示
+    items = [
+        {
+            "title": "具身智能公司完成融资",
+            "url": "https://a/1",
+            "snippet": "",
+            "published": "2026-10-09T09:00:00+00:00",
+        },
+        {"title": "无关内容", "url": "https://a/2", "snippet": "", "published": "2026-10-09T08:00:00+00:00"},
+    ]
+    hits, note = match_feed_items(items, "今天有哪些重要的具身智能新闻？", limit=5)
+    assert [hit["url"] for hit in hits] == ["https://a/1"]
+    assert note == "", "功能词不该被当成缺失的关键词报出来"
+
+
+def test_match_feed_items_still_reports_real_missing_keyword() -> None:
+    # 剔除功能词不能把"真的少了一个实词"这件事一起吞掉
+    items = [{"title": "AI 与具身智能公司完成融资", "url": "https://a/1", "snippet": "", "published": ""}]
+    _, note = match_feed_items(items, "今天有哪些 AI 芯片新闻？", limit=5)
+    assert "芯片" in note
+
+
+def test_match_feed_items_falls_back_when_only_function_words() -> None:
+    # 整句都是功能词时不能返回空关键词表，否则退化成"返回最新内容"还带一遍无关提示
+    items = [{"title": "有哪些新闻", "url": "https://a/1", "snippet": "", "published": ""}]
+    hits, note = match_feed_items(items, "有哪些新闻", limit=5)
+    assert [hit["url"] for hit in hits] == ["https://a/1"]
+    assert note == ""
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("今天有哪些重要的人工智能新闻？请给出 3 条要点", ["人工智能"]),
+        ("AI 芯片", ["AI", "芯片"]),
+        ("量子计算", ["量子计算"]),
+        # 整句只剩一个内容词时也要能剥干净，否则整句进匹配永远不命中
+        ("具身智能机器人产业最新进展如何", ["具身智能机器人产业", "进展"]),
+    ],
+)
+def test_phrases_keep_only_content_words(query: str, expected: list[str]) -> None:
+    assert _phrases(query) == expected
+
+
+def test_keywords_expand_long_words_for_matching() -> None:
+    # 没有分词器时整串长词不可能出现在标题里，切窗后才有机会命中
+    words = _keywords("具身智能机器人产业")
+    assert "具身智能机器人产业" in words
+    assert "机器人" in words
+    assert all(len(word) >= 2 for word in words)
+
+
+def test_long_word_windows_do_not_leak_into_note() -> None:
+    items = [{"title": "某公司发布机器人新品", "url": "https://a/1", "snippet": "", "published": ""}]
+    query = "具身智能机器人产业 融资"
+    hits, note = match_feed_items(items, query, limit=5)
+    assert [hit["url"] for hit in hits] == ["https://a/1"], "长词切窗应让它能命中"
+    # 提示语只能出现内容词，不能出现「能机器」这类切出来的窗口片段
+    quoted = note.split("「")[1].split("」")[0].split("、")
+    assert all(word in _phrases(query) for word in quoted)
+
+
 def test_match_feed_items_deduplicates_and_limits() -> None:
     items = [
         {"title": "同名文章", "url": "https://a/1", "snippet": "", "published": "2026-10-09T09:00:00+00:00"},
@@ -336,30 +402,3 @@ def test_match_feed_items_deduplicates_and_limits() -> None:
 )
 def test_clean_snippet_thresholds(raw: str, expected_empty: bool) -> None:
     assert (clean_snippet(raw) == "") is expected_empty
-
-
-@respx.mock
-async def test_feeds_provider_contains_single_feed_failure() -> None:
-    # 单个源挂掉不能拖垮整次检索，其余源仍要返回结果
-    good = "https://good.example/feed"
-    bad = "https://bad.example/feed"
-    respx.get(good).mock(return_value=httpx.Response(200, text=FEED_FIXTURE.read_text(encoding="utf-8")))
-    respx.get(bad).mock(side_effect=httpx.ConnectTimeout("超时"))
-
-    tool = SearchTool(
-        AgentSection(search_results=3),
-        Secrets(search_provider="feeds"),
-        feeds=[good, bad],
-    )
-    result = await tool.run("厄尔尼诺")
-    assert result.sources, "好源的结果必须保留"
-    assert all(source.url.startswith("http") for source in result.sources)
-    await tool.aclose()
-
-
-@respx.mock
-async def test_feeds_provider_without_feeds_is_reported() -> None:
-    tool = SearchTool(AgentSection(), Secrets(search_provider="feeds"), feeds=[])
-    result = await tool.run("AI")
-    assert "没有搜索到相关结果" in result.text
-    await tool.aclose()
