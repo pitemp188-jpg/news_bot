@@ -77,6 +77,9 @@ class App:
     async def start(self) -> dict[str, bool]:
         """组装并启动全部组件，返回各平台在线状态。"""
         config = self._config
+        # 先建数据目录：SQLite 不会自动创建父目录，缺目录时只会抛出
+        # 一句 unable to open database file，干净机器上首次部署必踩
+        config.data_dir.mkdir(parents=True, exist_ok=True)
         db = self.db = Database(config.db_url)
         await db.init()
 
