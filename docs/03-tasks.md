@@ -49,11 +49,11 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T4.1 | 搜索工具 | `agent/tools/search.py` | SearXNG / Tavily 统一返回结构；时间范围过滤；respx mock 测试 | M1 |
-| [ ] | T4.2 | 抓取工具 | `agent/tools/fetch.py` | 正文抽取、大小上限、超时、SSRF 拦截（内网/回环/非 http） | M1 |
-| [ ] | T4.3 | 浏览器工具 | `agent/tools/browser.py` | 封装 browser-use；步数/超时上限；并发信号量；本地 fixture 页面测试 | M1 |
-| [ ] | T4.4 | 资讯库工具 | `agent/tools/newsdb.py` | 按关键词 / 时间查询 `news_item` | M1 |
-| [ ] | T4.5 | 规划循环 | `agent/runner.py`、`agent/prompts.py` | tool-calling 循环；步数/token/耗时预算；输出带来源的 findings；FakeLLM 脚本化测试 | T4.1–T4.4 |
+| [x] | T4.1 | 搜索工具 | `agent/tools/search.py` | SearXNG / Tavily 统一返回结构；时间范围过滤；respx mock 测试 | M1 |
+| [x] | T4.2 | 抓取工具 | `agent/tools/fetch.py` | 正文抽取、大小上限、超时、SSRF 拦截（内网/回环/非 http） | M1 |
+| [x] | T4.3 | 浏览器工具 | `agent/tools/browser.py` | 封装 browser-use；步数/超时上限；并发信号量；本地 fixture 页面测试 | M1 |
+| [x] | T4.4 | 资讯库工具 | `agent/tools/newsdb.py` | 按关键词 / 时间查询 `news_item` | M1 |
+| [x] | T4.5 | 规划循环 | `agent/runner.py`、`agent/prompts.py` | tool-calling 循环；步数/token/耗时预算；输出带来源的 findings；FakeLLM 脚本化测试 | T4.1–T4.4 |
 
 ## M5 结果处理　分支 `feat/m5-result`　tag `v0.5.0`
 
