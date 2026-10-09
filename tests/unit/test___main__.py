@@ -158,6 +158,19 @@ def test_backup_creates_snapshot(
     assert "数据库快照已生成" in capsys.readouterr().out
 
 
+def test_backup_reports_missing_database(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # 全新部署时数据库还没建；过去会抛 FileNotFoundError 堆栈，这里必须给可操作提示
+    async def missing(_self: object, out: str | None = None) -> Path:
+        raise FileNotFoundError("数据库不存在：/tmp/newsbot.db")
+
+    monkeypatch.setattr(cli.App, "backup", missing.__get__(None, cli.App))
+    assert cli.main(["backup"]) == 1
+    out = capsys.readouterr().out
+    assert "数据库不存在" in out
+    assert "python -m newsbot run" in out
+    assert "数据库快照已生成" not in out
+
+
 def test_api_subcommand_is_registered() -> None:
     args = cli._build_parser().parse_args(["api", "--host", "0.0.0.0", "--port", "9000"])
     assert (args.command, args.host, args.port) == ("api", "0.0.0.0", 9000)
