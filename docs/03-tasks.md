@@ -85,8 +85,10 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T7.1 | 服务与登录 | `api/server.py` | 默认监听 127.0.0.1；口令登录；HttpOnly Cookie；CSRF 校验 | M6 |
-| [ ] | T7.2 | 业务接口 | `api/routes/*.py` | 任务列表/详情/取消/重试；定时任务 CRUD；资讯与推送记录查询；系统状态（适配器在线、队列长度、今日 token） | T7.1 |
+| [x] | T7.1 | 服务与登录 | `api/server.py` | 默认监听 127.0.0.1；口令登录；HttpOnly Cookie；CSRF 校验 | M6 |
+| [x] | T7.2 | 业务接口 | `api/routes/*.py` | 任务列表/详情/取消/重试；定时任务 CRUD；资讯与推送记录查询；系统状态（适配器在线、队列长度、今日 token） | T7.1 |
+| [x] | T7.3 | 运维子命令 | `__main__.py`：`api` / `doctor` / `backup` | `doctor` 离线检查配置与依赖且不打印密钥；`backup` 用 VACUUM INTO 生成快照；`api` 启动管理后台 | T7.1 |
+| [x] | T7.4 | 平台凭证路径 | `gateway/weixin.py`、`.env.example` | 微信 / QQ 凭证均来自开放平台配置，运行期无需登录；`login` 降级为可选的凭证领取助手并支持自定义 `base_url` | — |
 
 ## M8 管理界面　分支 `feat/m8-web`　tag `v0.8.0`
 
@@ -127,3 +129,4 @@
 | 2026-10-09 | Copilot | T2.1–T2.6 | `feat/m2-gateway` | `check.py` 全量通过（290 个测试）；集成测试覆盖入站→鉴权→队列→Agent 抓取→成稿→投递与 waiting_user 补投；用真实分段逻辑验证长日报切分不超平台上限 | 微信 / QQ 真实凭证与 live 测试仍待人工执行 |
 | 2026-10-09 | Copilot | T6.1–T6.4 | `feat/m6-scenarios` | `check.py` 全量通过（311 个测试，含覆盖率）；`tests/e2e/test_scenarios.py` 三个场景全部通过：S1 定时触发自动推送、S2 聊天指令查询（含重复来源去重）、notify 主动推送；e2e 抓取真实本地站点 `tests/fixtures/pages/article.html`；另用真实进程跑 `python -m newsbot notify` 冒烟，确认组装→启动→投递→关闭全链路无异常 | 界面与 API 尚未提供（M7/M8）；微信 / QQ 真实凭证与 live 测试仍待人工执行 |
 | 2026-10-09 | Copilot | T6.5–T6.7 | `feat/m65-live` | `check.py` 全量通过（315 个测试，覆盖率 93%）；`-m live tests/live` 14 个真实链路用例全绿：真实模型纯文本/tool-calling/工具结果回填/用量落库、真实公网抓取（example.com、iana.org）与 SSRF 防护、真实 Agent 规划循环、整机 assembled 服务下全部聊天指令 + S1 定时推送 + S2 聊天查询 + notify；用内置浏览器打开真实抓取的 `tests/fixtures/pages/article.html` 确认正文与断言一致 | 微信 / QQ 仍需真实凭证（下一里程碑验证）；公网站点偶发 429 / 连接失败属正常，已通过收紧步数预算与提示词约束规避 |
+| 2026-10-09 | Copilot | T7.1–T7.4 | `feat/m7-api` | `check.py` 全量通过（371 个测试，覆盖率 93%）；API 层 51 个用例覆盖登录/CSRF/会话过期/任务取消重跑/订阅 CRUD 与调度器同步/内容过滤/系统状态/主动推送；CLI 12 个用例覆盖 `api`/`doctor`/`backup`；接口与静态托管将在 M8 用内置浏览器点击截图验收 | 前端静态资源尚未构建（M8）；`doctor` 与 `backup` 待真实运行确认 |

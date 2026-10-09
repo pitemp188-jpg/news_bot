@@ -57,7 +57,10 @@ news_bot/
 │   │   ├── dedup.py
 │   │   └── report.py
 │   └── api/
-│       ├── server.py            # FastAPI 应用、登录、静态资源
+│       ├── server.py            # FastAPI 应用、登录、静态资源托管
+│       ├── security.py          # 会话与 CSRF
+│       ├── deps.py              # 依赖注入与鉴权依赖
+│       ├── serializers.py       # ORM 行 → JSON
 │       └── routes/
 │           ├── tasks.py
 │           ├── schedules.py

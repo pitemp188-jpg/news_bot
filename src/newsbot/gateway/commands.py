@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import re
-
 from sqlalchemy import select
 
 from newsbot.core.config import ScheduleSection
@@ -15,6 +13,7 @@ from newsbot.core.db import Database
 from newsbot.core.log import get_logger
 from newsbot.core.models import Schedule, Task
 from newsbot.dispatcher.queue import TaskQueue
+from newsbot.dispatcher.scheduler import cron_from_time
 from newsbot.gateway.base import MessageEvent, safe_id
 
 logger = get_logger(__name__)
@@ -29,16 +28,7 @@ HELP_TEXT = """可用指令：
 
 MAX_LISTED_SCHEDULES = 10
 MAX_LISTED_TASKS = 5
-_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 ACTIVE_STATES = ("pending", "running")
-
-
-def cron_from_time(value: str) -> str:
-    """把 HH:MM 转成五段式 cron；非法输入回退到默认时间。"""
-    match = _TIME_RE.match(value.strip())
-    if match is None:
-        raise ValueError(f"时间格式应为 HH:MM，收到 {value!r}")
-    return f"{int(match.group(2))} {int(match.group(1))} * * *"
 
 
 class Commands:

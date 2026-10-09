@@ -1,12 +1,13 @@
 """
 模块: dispatcher.scheduler
-职责: 定时调度——从 schedule 表同步作业，到点把订阅转成任务提交
+职责: 定时调度——cron 解析、从 schedule 表同步作业、到点把订阅转成任务提交
 依赖: core.db, core.log, core.models
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -20,6 +21,16 @@ from newsbot.core.models import Schedule
 logger = get_logger(__name__)
 
 SubmitSchedule = Callable[[Schedule], Awaitable[None]]
+
+_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+
+def cron_from_time(value: str) -> str:
+    """把 HH:MM 转成五段式 cron；非法输入抛 ValueError。"""
+    match = _TIME_RE.match((value or "").strip())
+    if match is None:
+        raise ValueError(f"时间格式应为 HH:MM，收到 {value!r}")
+    return f"{int(match.group(2))} {int(match.group(1))} * * *"
 
 
 def job_id(schedule_id: int) -> str:

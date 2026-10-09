@@ -35,6 +35,7 @@ class Secrets(BaseSettings):
 
     weixin_token: str = ""
     weixin_account_id: str = ""
+    weixin_base_url: str = "https://ilinkai.weixin.qq.com"
     weixin_allowed_users: str = ""
 
     qq_app_id: str = ""
