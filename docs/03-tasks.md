@@ -39,10 +39,10 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | T3.1 | 任务队列 | `dispatcher/queue.py` | 提交/领取/并发上限/超时/重试/取消/重启恢复，状态机符合 01 第 7 节 | M1 |
-| [ ] | T3.2 | 会话 | `dispatcher/session.py` | 按 (platform, chat_id) 保存最近 N 轮，超长截断 | T3.1 |
-| [ ] | T3.3 | 定时调度 | `dispatcher/scheduler.py` | 从 `schedule` 表同步 job；运行时增删；错过触发容忍；时区正确 | T3.1 |
-| [ ] | T3.4 | 执行流水线 | `dispatcher/pipeline.py` | agent→result→Sender；用 Fake 全替身跑通 | T3.1 |
+| [x] | T3.1 | 任务队列 | `dispatcher/queue.py` | 提交/领取/并发上限/超时/重试/取消/重启恢复，状态机符合 01 第 7 节 | M1 |
+| [x] | T3.2 | 会话 | `dispatcher/session.py` | 按 (platform, chat_id) 保存最近 N 轮，超长截断 | T3.1 |
+| [x] | T3.3 | 定时调度 | `dispatcher/scheduler.py` | 从 `schedule` 表同步 job；运行时增删；错过触发容忍；时区正确 | T3.1 |
+| [x] | T3.4 | 执行流水线 | `dispatcher/pipeline.py` | agent→result→Sender；用 Fake 全替身跑通 | T3.1 |
 
 ## M4 AI Agent　分支 `feat/m4-agent`　tag `v0.4.0`
 
