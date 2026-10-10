@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from newsbot.core.config import load_config
+from newsbot.core.config import FeedSource, SearchSection, default_feeds, load_config
 from newsbot.core.errors import ConfigError
 
 
@@ -60,3 +60,30 @@ def test_ensure_ready_passes_with_key(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setenv("LLM_API_KEY", "test-value")
     config = load_config(tmp_path / "missing.yaml")
     config.ensure_ready()
+
+
+def test_default_feeds_carry_weights_and_industries() -> None:
+    """默认源要带上质量权重与行业标签，并按行业覆盖多个领域。"""
+    feeds = default_feeds()
+    assert len(feeds) >= 10, "按行业补源意味着源要有一定覆盖面"
+    assert all(feed.url.startswith("https://") for feed in feeds)
+    assert any(feed.weight > 1.0 for feed in feeds), "必须存在权重高于基准的权威源"
+    assert any(feed.weight < 1.0 for feed in feeds), "也要有降权的源，否则权重没有区分度"
+    topics = {topic for feed in feeds for topic in feed.topics}
+    for expected in ("AI", "开发", "科技", "芯片"):
+        assert expected in topics, f"缺少 {expected} 行业的源"
+    assert len({feed.url for feed in feeds}) == len(feeds), "同一个源只该出现一次"
+
+
+def test_search_section_accepts_plain_url_list() -> None:
+    """config.yaml 里只写网址要能继续工作，否则老配置一升级就报错。"""
+    section = SearchSection(feeds=["https://a.example/feed", "https://b.example/feed"])
+    assert [feed.url for feed in section.feeds] == ["https://a.example/feed", "https://b.example/feed"]
+    assert [feed.weight for feed in section.feeds] == [1.0, 1.0]
+    assert section.feed_weights() == {"a.example": 1.0, "b.example": 1.0}
+
+
+def test_search_section_keeps_explicit_weight_and_topics() -> None:
+    section = SearchSection(feeds=[{"url": "https://www.a.example/feed", "weight": 1.2, "topics": ["AI"]}])
+    assert section.feeds == [FeedSource(url="https://www.a.example/feed", weight=1.2, topics=["AI"])]
+    assert section.feed_weights() == {"a.example": 1.2}, "域名要去掉 www.，否则权重匹配不上"

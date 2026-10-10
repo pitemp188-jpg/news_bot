@@ -34,6 +34,12 @@ def test_system_prompt_does_not_prescribe_a_procedure() -> None:
     assert "由你根据当前掌握的信息判断" in SYSTEM_PROMPT, "策略归属要明确交给模型"
 
 
+def test_system_prompt_asks_to_merge_same_story_sources() -> None:
+    """正文里同一件事只能写一条：去重管不到"已经写进正文的重复"。"""
+    assert "同一件事只写一条" in SYSTEM_PROMPT
+    assert "编号并列引用" in SYSTEM_PROMPT
+
+
 def test_system_prompt_asks_model_to_state_its_plan() -> None:
     # 规划必须可观测，否则只能在日志里事后推断规划失败（实测踩过）
     assert "想清楚" in SYSTEM_PROMPT

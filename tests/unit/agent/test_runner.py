@@ -55,7 +55,7 @@ async def test_tool_call_then_final_answer() -> None:
     assert findings.steps == 2
     assert findings.tokens == 40
     assert findings.budget_exhausted is False
-    assert findings.sources == [{"title": "标题", "url": "https://a.example/1", "label": "S1"}]
+    assert findings.sources == [{"title": "标题", "url": "https://a.example/1", "weight": 1.0, "label": "S1"}]
     assert search.queries == ["AI"]
     second_round = llm.calls[1]
     assert second_round[-2]["role"] == "assistant"
@@ -159,7 +159,7 @@ async def test_sources_are_deduplicated_by_url() -> None:
     )
     runner = Runner(llm, [DupTool()], _settings())
     findings = await runner.run("q")
-    assert findings.sources == [{"title": "A", "url": "https://same.example", "label": "S1"}]
+    assert findings.sources == [{"title": "A", "url": "https://same.example", "weight": 1.0, "label": "S1"}]
     await runner.aclose()
 
 

@@ -127,7 +127,7 @@ async def test_dedup_keeps_source_labels_aligned(tmp_path: Path) -> None:
         deduper = Deduper()
         deduper.remember(Item(title="旧的", url="https://example.com/dup"))
 
-        async def fixed() -> Deduper:
+        async def fresh() -> Deduper:
             return deduper
 
         pipeline = Pipeline(
@@ -136,7 +136,7 @@ async def test_dedup_keeps_source_labels_aligned(tmp_path: Path) -> None:
             reporter=ReportBuilder(),
             sender=FakeSender(),
             sessions=SessionStore(db),
-            deduper=fixed,
+            deduper=fresh,
         )
         task_id = await _make_task(db)
         async with db.session() as session:
@@ -149,7 +149,7 @@ async def test_dedup_keeps_source_labels_aligned(tmp_path: Path) -> None:
         # 被剔除的编号要如实说明，而且必须前置：读者先看到正文的 [S9] 才找来源就晚了
         assert content.startswith("（注：")
         assert "S9" in content.split("\n\n")[0]
-        assert "与近期推送重复" in content
+        assert "已合并" in content
     finally:
         await db.dispose()
 
@@ -273,5 +273,59 @@ async def test_task_without_target_only_reports(tmp_path: Path) -> None:
         assert sender.sent == []
         async with db.session() as session:
             assert len((await session.execute(select(Report))).scalars().all()) == 1
+    finally:
+        await db.dispose()
+
+
+async def test_same_story_is_merged_keeping_the_richest_source(tmp_path: Path) -> None:
+    """同一件事的多家报道只留质量最高的一条：这是"内容去重"而不是"按来源去重"。"""
+    db = await _make_db(tmp_path)
+    try:
+        findings = Findings(
+            answer="结论 [S1] [S2] [S3]",
+            sources=[
+                {
+                    "title": "某公司发布 Qwen-Image-2.1-Turbo",
+                    "url": "https://wire.example/1",
+                    "snippet": "模型已开源。",
+                    "weight": 0.7,
+                    "label": "S1",
+                },
+                {
+                    "title": "某公司发布 Qwen-Image-2.1-Turbo，支持中文渲染",
+                    "url": "https://official.example/2",
+                    "snippet": "Qwen-Image-2.1-Turbo 是 8 步出图的 7B 图像模型，已在 ModelScope 开源，支持中文渲染。",
+                    "weight": 1.2,
+                    "label": "S2",
+                },
+                {
+                    "title": "英伟达发布新一代推理芯片",
+                    "url": "https://news.example/3",
+                    "snippet": "面向数据中心的推理加速卡。",
+                    "label": "S3",
+                },
+            ],
+        )
+
+        async def fresh() -> Deduper:
+            return Deduper()
+
+        pipeline = Pipeline(
+            db,
+            runner=FakeRunner(findings=findings),
+            reporter=ReportBuilder(),
+            sender=FakeSender(),
+            sessions=SessionStore(db),
+            deduper=fresh,
+        )
+        task_id = await _make_task(db)
+        async with db.session() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            await pipeline.execute(session, task)
+
+        kept = [item["label"] for item in findings.sources]
+        assert kept == ["S2", "S3"], "同一件事留下信息最全的那条；另一件事不受影响"
+        assert "S1" in findings.answer.split("\n\n")[0]
     finally:
         await db.dispose()

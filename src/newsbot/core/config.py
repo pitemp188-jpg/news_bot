@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from newsbot.core.errors import ConfigError
@@ -83,22 +83,98 @@ class DeliverySection(BaseModel):
     fallback_platform: str = "qqbot"
 
 
+class FeedSource(BaseModel):
+    """一个订阅源：地址、质量权重与行业标签。
+
+    权重不是装饰：同一件事被多家媒体报道时，去重要靠它挑出**保留**哪一条；
+    检索排序也靠它把权威源顶到前面。默认 1.0，官方源 / 一线媒体给 1.0～1.2，
+    聚合与消费级媒体给 0.7～0.9。
+    """
+
+    url: str
+    weight: float = 1.0
+    topics: list[str] = Field(default_factory=list)
+
+
+def _host_of(url: str) -> str:
+    return url.split("//")[-1].split("/")[0].removeprefix("www.")
+
+
+def default_feeds() -> list[FeedSource]:
+    """按行业分组的默认订阅源。
+
+    每个源都做过实测（可达性、解析条数、是否给真实文章地址、发布时间）。被排除的
+    源连同实测结论留在这里，避免以后有人凭印象加回来：
+
+    - `36kr.com/feed`：返回的是验证拦截页（HTML），解析出 0 条
+    - `jiqizhixin.com/rss`、`anandtech.com/rss`、`hashnode.com/rss`：HTTP 200 但 0 条
+    - `github.blog/feed`、`aws.amazon.com/blogs/aws/feed`、`devblogs.microsoft.com/feed`、
+      `feeds.arstechnica.com`、`engadget.com/rss.xml`、`the-decoder.com/feed`、
+      `krebsonsecurity.com/feed`、`feeds.feedburner.com/TheHackersNews`：连接超时
+    - `bleepingcomputer.com/feed`：403
+    - `reddit.com/r/MachineLearning/.rss`：连接错误
+
+    还有几个源在本机网络下**时通时断**（`venturebeat.com`、`lobste.rs`、`theverge.com`、
+    `hnrss.org`）：实测同一源有时 0.4s 返回、有时 8s 超时。它们仍保留在列表里，因为
+    单源超时会被跳过、不影响整次检索；但也不该是唯一来源。
+    """
+    return [
+        # ── AI ──
+        # 量子位：中文 AI 一线，实测 0.5s / 10 条，摘要偶尔为空（正常，正文交给 fetch）
+        FeedSource(url="https://www.qbitai.com/feed", weight=1.2, topics=["AI"]),
+        # VentureBeat：英文 AI 产业报道，实测 0.5～2.8s / 7 条
+        FeedSource(url="https://venturebeat.com/feed/", weight=1.0, topics=["AI"]),
+        # MarkTechPost：覆盖广但对发布方自述照抄较多，权重下调
+        FeedSource(url="https://www.marktechpost.com/feed/", weight=0.9, topics=["AI"]),
+        # ── 开发 / 云原生 ──
+        # InfoQ 中文：工程实践质量高，实测 0.4s / 20 条（摘要多为空，是站点本身如此）
+        FeedSource(url="https://www.infoq.cn/feed", weight=1.1, topics=["开发"]),
+        # Kubernetes 官方博客：一手信息，实测 2.9s / 50 条
+        FeedSource(url="https://kubernetes.io/feed.xml", weight=1.0, topics=["开发", "云原生"]),
+        # ── 综合科技 ──
+        # 爱范儿：中文消费科技，实测 0.5s / 20 条
+        FeedSource(url="https://www.ifanr.com/feed", weight=1.0, topics=["科技"]),
+        FeedSource(url="https://techcrunch.com/feed/", weight=1.0, topics=["科技", "创业"]),
+        # Solidot：中文科技短讯，摘要完整
+        FeedSource(url="https://www.solidot.org/index.rss", weight=0.9, topics=["科技"]),
+        FeedSource(url="https://www.wired.com/feed/rss", weight=0.9, topics=["科技"]),
+        FeedSource(url="https://www.theverge.com/rss/index.xml", weight=0.9, topics=["科技"]),
+        # ── 芯片 / 硬件 ──
+        # 半导体工程：面向设计与工艺的一手报道，实测 4.6s / 10 条
+        FeedSource(url="https://semiengineering.com/feed/", weight=1.0, topics=["芯片"]),
+        FeedSource(url="https://www.eetimes.com/feed/", weight=1.0, topics=["芯片"]),
+        # Tom's Hardware：覆盖消费级硬件，权威度低于前两者，实测 2.2～7.2s / 50 条
+        FeedSource(url="https://www.tomshardware.com/feeds/all", weight=0.7, topics=["硬件"]),
+        # ── 社区 ──
+        # Lobsters：技术社区精选，实测 1.0～4.5s / 25 条
+        FeedSource(url="https://lobste.rs/rss", weight=0.8, topics=["开发"]),
+        # Hacker News：实测时通时断（成功 1.9s，失败 5s 超时）；单源超时会跳过它，
+        # 保留是因为内容价值高，但它不应是唯一来源
+        FeedSource(url="https://hnrss.org/frontpage", weight=0.7, topics=["开发", "科技"]),
+    ]
+
+
 class SearchSection(BaseModel):
     """搜索配置。`feeds` 用于 SEARCH_PROVIDER=feeds：订阅权威源的 RSS，按关键词过滤。"""
 
-    # 只保留实测可直连、且给出真实文章地址的源
-    feeds: list[str] = Field(
-        default_factory=lambda: [
-            "https://www.qbitai.com/feed",
-            "https://www.infoq.cn/feed",
-            "https://www.ifanr.com/feed",
-            "https://www.solidot.org/index.rss",
-            "https://techcrunch.com/feed/",
-            "https://hnrss.org/frontpage",
-        ]
-    )
-    # 单次拉取的并发上限，避免一次打开太多连接
+    # 只放**实测可直连、能解析出真实文章地址**的源；加源前先跑一次实测，
+    # 否则一个连不上的源只会白等一次超时（下面每条都标了实测结论）
+    feeds: list[FeedSource] = Field(default_factory=default_feeds)
+    # 单次拉取的并发上限，避免一次打开太多连接。实测 6 并发在连续检索时会让多个源
+    # 同时失败（网络侧限速），4 稳定
     feed_concurrency: int = 4
+
+    @field_validator("feeds", mode="before")
+    @classmethod
+    def _accept_plain_urls(cls, value: Any) -> Any:
+        """允许 config.yaml 里只写网址：`feeds: ["https://a/feed"]` 等价于 weight=1、无行业标签。"""
+        if not isinstance(value, list):
+            return value
+        return [{"url": item} if isinstance(item, str) else item for item in value]
+
+    def feed_weights(self) -> dict[str, float]:
+        """域名 → 权重；搜索工具用它给命中项加权，让权威源排在前面。"""
+        return {_host_of(feed.url): feed.weight for feed in self.feeds}
 
 
 class ApiSection(BaseModel):

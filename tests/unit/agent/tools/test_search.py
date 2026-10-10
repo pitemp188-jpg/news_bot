@@ -14,6 +14,7 @@ import httpx
 import pytest
 import respx
 
+from newsbot.agent.runner import SourceRegistry
 from newsbot.agent.tools.search import (
     BING_ENDPOINT,
     SearchTool,
@@ -23,7 +24,7 @@ from newsbot.agent.tools.search import (
     parse_feed,
     query_tokens,
 )
-from newsbot.core.config import AgentSection, Secrets
+from newsbot.core.config import AgentSection, FeedSource, Secrets
 from newsbot.core.errors import RetriableError
 
 SEARX = "http://127.0.0.1:8080/search"
@@ -392,6 +393,43 @@ def test_clean_snippet_thresholds(raw: str, expected_empty: bool) -> None:
 
 
 @respx.mock
+async def test_feed_retries_transient_connection_error_once() -> None:
+    """连续检索时实测会出现"整批里几个源同时失败"——那是抖动，重试一次即可。"""
+    url = "https://flaky.example/feed"
+    route = respx.get(url).mock(
+        side_effect=[
+            httpx.ConnectError("抖动"),
+            httpx.Response(200, text=FEED_FIXTURE.read_text(encoding="utf-8")),
+        ]
+    )
+    tool = SearchTool(
+        AgentSection(search_results=3),
+        Secrets(search_provider="feeds"),
+        feeds=[FeedSource(url=url)],
+    )
+    result = await tool.run("厄尔尼诺")
+    await tool.aclose()
+    assert route.call_count == 2, "瞬时连接错误要重试一次"
+    assert result.sources, "重试成功后结果要保留"
+
+
+@respx.mock
+async def test_feed_timeout_is_not_retried() -> None:
+    """慢源会一直慢，重试只是让整次检索多等一个超时周期。"""
+    url = "https://slow.example/feed"
+    route = respx.get(url).mock(side_effect=httpx.ReadTimeout("一直很慢"))
+    tool = SearchTool(
+        AgentSection(search_results=3),
+        Secrets(search_provider="feeds"),
+        feeds=[FeedSource(url=url)],
+    )
+    result = await tool.run("厄尔尼诺")
+    await tool.aclose()
+    assert route.call_count == 1, "超时不该重试"
+    assert result.sources == []
+
+
+@respx.mock
 async def test_feeds_provider_contains_single_feed_failure() -> None:
     # 单个源挂掉不能拖垮整次检索，其余源仍要返回结果
     good = "https://good.example/feed"
@@ -402,7 +440,7 @@ async def test_feeds_provider_contains_single_feed_failure() -> None:
     tool = SearchTool(
         AgentSection(search_results=3),
         Secrets(search_provider="feeds"),
-        feeds=[good, bad],
+        feeds=[FeedSource(url=good, weight=1.2), FeedSource(url=bad)],
     )
     result = await tool.run("厄尔尼诺")
     assert result.sources, "好源的结果必须保留"
@@ -425,7 +463,7 @@ async def test_feeds_provider_does_not_wait_for_slow_feed() -> None:
     tool = SearchTool(
         AgentSection(search_results=3),
         Secrets(search_provider="feeds"),
-        feeds=[good, slow],
+        feeds=[FeedSource(url=good), FeedSource(url=slow)],
         feed_timeout=0.05,
     )
     started = time.monotonic()
@@ -442,3 +480,72 @@ async def test_feeds_provider_without_feeds_is_reported() -> None:
     result = await tool.run("AI")
     assert "没有搜索到相关结果" in result.text
     await tool.aclose()
+
+
+def test_match_feed_items_prefers_authoritative_source_on_ties() -> None:
+    """相关度相同时权威源排在前面——去重会保留排在前面的那条。"""
+    items = [
+        {
+            "title": "阿里发布 Qwen-Image-2.1-Turbo",
+            "url": "https://low/1",
+            "snippet": "",
+            "published": "",
+            "weight": 0.7,
+        },
+        {
+            "title": "阿里发布 Qwen-Image-2.1-Turbo 模型",
+            "url": "https://high/2",
+            "snippet": "",
+            "published": "",
+            "weight": 1.2,
+        },
+    ]
+    hits, _ = match_feed_items(items, "Qwen-Image-2.1-Turbo", limit=5)
+    assert hits[0]["url"] == "https://high/2"
+
+
+def test_match_feed_items_relevance_beats_weight() -> None:
+    """权重只是次级因素：一个低权重源只要真的相关，就该压过沾了个词的高权重源。"""
+    items = [
+        {"title": "无关内容只是提到 Qwen", "url": "https://high/1", "snippet": "", "published": "", "weight": 1.2},
+        {
+            "title": "Qwen-Image-2.1-Turbo 是 8 步出图的图像模型",
+            "url": "https://low/2",
+            "snippet": "",
+            "published": "",
+            "weight": 0.7,
+        },
+    ]
+    hits, _ = match_feed_items(items, "Qwen-Image-2.1-Turbo 图像模型", limit=5)
+    assert hits[0]["url"] == "https://low/2"
+
+
+@respx.mock
+async def test_search_output_lets_source_registry_rewrite_labels() -> None:
+    """搜索输出必须能被 `SourceRegistry.render` 改写编号。
+
+    契约是"编号行 + 紧随其后的**纯网址**行"：网址行上只要多出任何后缀（例如把
+    来源名标在网址后面），改写就会静默失效，正文的 `[S2]` 会指到另一篇文章上。
+    实测踩过一次，所以这里直接拿真实输出跑一遍。
+    """
+    feed = "https://good.example/feed"
+    respx.get(feed).mock(return_value=httpx.Response(200, text=FEED_FIXTURE.read_text(encoding="utf-8")))
+    tool = SearchTool(
+        AgentSection(search_results=3),
+        Secrets(search_provider="feeds"),
+        feeds=[FeedSource(url=feed)],
+    )
+    result = await tool.run("厄尔尼诺")
+    await tool.aclose()
+    assert result.sources, "用例需要至少一条来源"
+
+    registry = SourceRegistry()
+    registry.register(result.sources)
+    rendered = registry.render(result.text)
+
+    first_url = result.sources[0].url
+    lines = rendered.splitlines()
+    numbered = [index for index, line in enumerate(lines) if line.startswith("S1. ")]
+    assert numbered, "编号行没有被改写成全局编号"
+    assert lines[numbered[0] + 1].strip() == first_url, "编号行后面必须紧跟纯网址，不能有任何后缀"
+    assert registry.label(first_url) == "S1"

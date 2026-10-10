@@ -12,13 +12,24 @@ from typing import Any, Protocol
 
 @dataclass(frozen=True)
 class Source:
-    """一条可引用的来源。"""
+    """一条可引用的来源。
+
+    `snippet` 与 `weight` 不只是展示用：去重要靠 `snippet` 判断"这是不是同一件事
+    的另一家报道"（只比对标题判不出来），要靠 `weight` 在同一件事的多家报道里
+    挑出质量最高的那条保留。字段少了这两个，去重就只能退化成按网址过滤。
+    """
 
     title: str
     url: str
+    snippet: str = ""
+    weight: float = 1.0
 
-    def as_dict(self) -> dict[str, str]:
-        return {"title": self.title, "url": self.url}
+    def as_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"title": self.title, "url": self.url}
+        if self.snippet:
+            data["snippet"] = self.snippet
+        data["weight"] = self.weight
+        return data
 
 
 @dataclass

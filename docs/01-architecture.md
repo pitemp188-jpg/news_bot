@@ -47,7 +47,7 @@ flowchart TD
 | 存储 | SQLite（WAL）+ SQLAlchemy 2.0 async + Alembic | 零运维；后续可切 PostgreSQL |
 | LLM | OpenAI 兼容接口（openai SDK） | 可接 DeepSeek / 通义 / GPT 等 |
 | 浏览器驱动 | browser-use + Chromium | 开源成熟的浏览器自动化内核；我们直接用它的动作原语，不由它规划（pip 依赖，不拷贝） |
-| 搜索 API | SearXNG（自建，免费）/ Tavily，统一接口 | 低成本优先走搜索，浏览器兜底 |
+| 搜索 API | 内置 `feeds`（按行业订阅权威 RSS）/ Bing / SearXNG / Tavily，统一接口 | 低成本优先走搜索，浏览器兜底 |
 | 正文抽取 | httpx + trafilatura | 静态页面无需启动浏览器 |
 | 消息网关 | 裁剪移植 hermes-agent `gateway/`：微信 = 腾讯 iLink Bot API（HTTP 长轮询），QQ = 官方 Bot API v2（WebSocket + REST）；httpx + websockets | MIT 协议，成熟；见 [08-porting.md](08-porting.md) |
 | 管理界面 | Vue 3 + Vite + TypeScript + Naive UI | 轻量，构建后由 FastAPI 托管静态文件 |
@@ -63,7 +63,7 @@ flowchart TD
 | gateway | `src/newsbot/gateway/` | 平台适配器（微信 / QQ）、白名单鉴权、聊天指令、入站路由、出站投递 | `BaseAdapter`、`MessageEvent`、`router.send()` |
 | dispatcher | `src/newsbot/dispatcher/` | 任务队列与 worker、超时重试取消、会话上下文、定时调度、执行流水线 | `queue.submit()`、`queue.cancel()`、`scheduler.sync()` |
 | agent | `src/newsbot/agent/` | 规划循环 + 工具（search / fetch / browser / newsdb） | `runner.run(query, ctx) -> Findings` |
-| result | `src/newsbot/result/` | 去重、引用编号、摘要成稿、按平台格式化与分段 | `dedup.filter()`、`report.build()` |
+| result | `src/newsbot/result/` | 内容去重、引用编号、摘要成稿、按平台格式化与分段 | `dedup.keep_indexes()`、`report.build()` |
 | api | `src/newsbot/api/` | 管理后台 REST、登录鉴权、托管前端静态资源 | `/api/*` |
 | web | `web/` | 管理界面：仪表盘、任务、定时任务、资讯库、推送记录、设置 | — |
 
@@ -75,13 +75,23 @@ flowchart TD
 
 **检索词由模型负责提炼**（`agent/tools/search.py`）：工具只按空白与标点切词并逐个匹配，不做停用词过滤、同义改写或窗口切分。部分命中时如实反馈"哪些词没有任何条目同时包含"，让模型据此改写检索词——把反馈信号删掉，规划能力就永远长不出来。
 
+**订阅源按行业分组并带质量权重**（`core.config.default_feeds`）：每个源声明 `weight`（官方源/一线媒体 1.0～1.2，聚合与消费级媒体 0.7～0.9）与 `topics`（AI / 开发 / 科技 / 芯片 / 硬件）。权重参与检索排序，也是同一件事被多家报道时决定"保留哪一条"的依据。**只收录实测可直连且能解析出真实文章地址的源**，被排除的源连同实测结论写在配置里（`36kr.com/feed` 返回验证拦截页、`github.blog/feed` 等连接超时）。营销导购条目（"XX Promo Codes"）在解析阶段丢弃——实测 Wired 的 feed 里十有六条是这类内容。
+
 **浏览器不套子 Agent**（`agent/tools/browser.py`）：`browser` 工具把 browser-use 的动作原语（open / click / type / scroll / keys / back / tabs / switch / text）直接交给主 Agent，由它自己看页面元素编号并决定下一步。浏览器侧因此**不需要任何 LLM 调用**。会话启动后会先探测 CDP 是否真的可用再返回（`start()` 返回不代表能接受指令）；连接类错误会丢弃会话并在下次调用重建；失败原因按"会话断开 / 页面拒绝 / 超时 / 元素编号失效"分类后回灌，让模型能决定重试、换页面还是换工具。
 
 优先级：`newsdb`（已有）→ `search` → `fetch` → `browser`。大部分问题在前三步解决，浏览器只在需要登录态、动态渲染或交互时使用。
 
-### 4.2 执行流水线
+### 4.2 内容去重
 
-`dispatcher/pipeline.py`：`agent.runner.run()` → 去重（对比近 N 天指纹，剔除重复来源）→ `result.report.build()` → 落库 `report` 与新来源（写 `news_item`）→ `Sender.send()`。
+去重依据是**内容**，不是来源（`result/dedup.py`）：不同媒体报同一件事要合并，同一家媒体的两条不同新闻都要保留——按来源去重会把一个媒体一天的多条新闻压成一条，那是丢失而不是去重。
+
+判据只认强证据，**宁可漏判也不误删**（误删会让读者永远看不到那条来源）：网址相同、内容指纹相同、**共带数字的标识符**（`qwen-image-2.1-turbo`、`cgroup-v2`——这是唯一能跨中英文对齐同一件事的词法证据），或词集相似度 ≥ 0.6（近逐字转载）。阈值来自实测：真实订阅源里**不同话题**的词集相似度上限只有 0.17，所以 0.6 不会误伤同话题的不同报道。被否掉的判据：用"共享若干普通拉丁词"判重会误删——「Alibaba Qwen Releases X」与「JetBrains Releases Y」共享 releases/model，同活动的两篇不同报道会共享活动名。
+
+保留哪一条按**信息量优先、来源权重次之**（信息量决定读者能不能直接读到结论，权重只在信息量并列时起作用）。判重顺序按质量从高到低，质量高的先占位，输出顺序仍是传入顺序，因此来源编号与正文引用都不受影响。中文改写、无版本号的纯中文事件判不出来——这部分由 Agent 在正文层面合并（提示词要求"同一件事只写一条，编号并列引用"）。
+
+### 4.3 执行流水线
+
+`dispatcher/pipeline.py`：`agent.runner.run()` → 内容去重（合并同一件事、剔除近期已推送）→ `result.report.build()` → 落库 `report` 与新来源（写 `news_item`）→ `Sender.send()`。
 `Sender` 由 `app.py` 启动时注入（实际实现为 `gateway.router.send`），dispatcher 不直接 import gateway。
 
 ## 5. 场景时序
@@ -98,7 +108,7 @@ sequenceDiagram
     S->>Q: 21:00 submit(kind=scheduled, topics)
     Q->>A: worker 取任务, run(topics)
     A-->>Q: findings(含来源)
-    Q->>R: dedup(对比近 7 天已推送) → report
+    Q->>R: dedup(同一件事合并 + 对比近 7 天已推送) → report
     R-->>Q: 文本分段
     Q->>G: send(target chats)
     G-->>Q: 投递结果写 delivery 表
