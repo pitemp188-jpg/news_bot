@@ -239,7 +239,7 @@ class App:
             NewsDbTool(db),
         ]
         if browser is not None or self._browser_available():
-            tools.append(BrowserTool(config.agent, secrets=config.secrets, data_dir=config.data_dir, runner=browser))
+            tools.append(BrowserTool(config.agent, data_dir=config.data_dir, runner=browser))
         return tools
 
     @staticmethod

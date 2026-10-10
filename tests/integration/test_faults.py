@@ -19,7 +19,7 @@ from tests.fakes.llm import FakeLLM, reply
 from tests.fakes.search import FakeSearchTool
 
 from newsbot.agent.runner import Runner
-from newsbot.agent.tools.browser import BrowserTool
+from newsbot.agent.tools.browser import ActionOutcome, BrowserTool
 from newsbot.core.config import AgentSection, DeliverySection, QueueSection
 from newsbot.core.db import Database
 from newsbot.core.errors import RetriableError
@@ -257,17 +257,20 @@ async def test_send_exception_falls_back_to_secondary_platform(tmp_path: Path) -
 
 @dataclass
 class CrashOnceRunner:
-    """第一次调用崩溃，之后恢复——模拟浏览器进程被杀。"""
+    """第一次动作失败，之后恢复——模拟浏览器进程被杀。"""
 
     crash_times: int = 1
     calls: int = 0
     closed: int = 0
 
-    async def run(self, url: str, task: str) -> str:
+    async def act(self, action: str, params: dict[str, Any]) -> Any:
+        from newsbot.agent.tools.browser import classify_error
+
         self.calls += 1
         if self.calls <= self.crash_times:
-            raise RuntimeError("Browser closed unexpectedly")
-        return "恢复后的页面正文"
+            # 真实驱动会自己吞掉异常并翻译成可行动说明，替身照同样契约返回
+            return ActionOutcome(error=classify_error(action, RuntimeError("Browser closed unexpectedly")))
+        return ActionOutcome(text="恢复后的页面正文")
 
     async def aclose(self) -> None:
         self.closed += 1
@@ -277,26 +280,30 @@ async def test_browser_crash_returns_failure_and_releases_slot() -> None:
     runner = CrashOnceRunner()
     tool = BrowserTool(AgentSection(browser_concurrency=1), runner=runner)
 
-    crashed = await tool.run("https://example.com", task="提取正文")
+    crashed = await tool.run("open", url="https://example.com")
     assert crashed.text.startswith("[工具执行失败]")
-    assert "浏览器执行出错" in crashed.text
+    assert "会话已断开" in crashed.text, "崩溃要翻译成 Agent 能据此决策的说明"
     assert "Browser closed unexpectedly" in crashed.text
 
     # 崩过之后信号量必须已释放，否则下一次调用会永久卡住
-    recovered = await asyncio.wait_for(tool.run("https://example.com", task="提取正文"), timeout=2.0)
-    assert recovered.text == "恢复后的页面正文"
+    recovered = await asyncio.wait_for(tool.run("open", url="https://example.com"), timeout=2.0)
+    assert "恢复后的页面正文" in recovered.text
     assert [source.url for source in recovered.sources] == ["https://example.com"]
 
     await tool.aclose()
     assert runner.closed == 1
-    assert runner.calls == 2
+    # 1 次失败 + 恢复后 open 与自动回读 state 各 1 次
+    assert runner.calls == 3
 
 
 async def test_agent_loop_survives_browser_crash() -> None:
     llm = FakeLLM(
         replies=[
-            reply("", calls=[ToolCall(id="c1", name="browse", arguments={"url": "https://example.com"})]),
-            reply("浏览器挂了，但根据已有信息给出结论 [1]"),
+            reply(
+                "",
+                calls=[ToolCall(id="c1", name="browser", arguments={"action": "open", "url": "https://example.com"})],
+            ),
+            reply("浏览器挂了，但根据已有信息给出结论 [S1]"),
         ]
     )
     tool = BrowserTool(AgentSection(browser_concurrency=1), runner=CrashOnceRunner())
@@ -305,8 +312,8 @@ async def test_agent_loop_survives_browser_crash() -> None:
     findings = await runner.run("看看这个页面")
     # 工具失败不终止循环：失败信息回灌给模型，仍然产出最终答复
     assert not findings.budget_exhausted
-    assert findings.answer == "浏览器挂了，但根据已有信息给出结论 [1]"
-    assert "浏览器执行出错" in str(llm.calls[1][-1]["content"])
+    assert findings.answer == "浏览器挂了，但根据已有信息给出结论 [S1]"
+    assert "会话已断开" in str(llm.calls[1][-1]["content"])
 
 
 # ── 4. 数据库锁 ──

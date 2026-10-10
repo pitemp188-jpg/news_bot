@@ -24,7 +24,7 @@ flowchart TD
         RUNNER[规划循环<br/>规划搜索词 → 选网站 → 调工具 → 分析]
         RUNNER --> T1[search 搜索 API]
         RUNNER --> T2[fetch 正文抽取]
-        RUNNER --> T3[browse 浏览器 Agent<br/>browser-use]
+        RUNNER --> T3[browser 浏览器动作<br/>browser-use]
         RUNNER --> T4[newsdb 资讯库]
     end
 
@@ -46,7 +46,7 @@ flowchart TD
 | 任务队列 | asyncio 队列 + `task` 表持久化 | 单用户场景，不引入 Redis / Celery |
 | 存储 | SQLite（WAL）+ SQLAlchemy 2.0 async + Alembic | 零运维；后续可切 PostgreSQL |
 | LLM | OpenAI 兼容接口（openai SDK） | 可接 DeepSeek / 通义 / GPT 等 |
-| 浏览器 Agent | browser-use + Chromium | 开源成熟的浏览器驱动 Agent 内核（pip 依赖，不拷贝） |
+| 浏览器驱动 | browser-use + Chromium | 开源成熟的浏览器自动化内核；我们直接用它的动作原语，不由它规划（pip 依赖，不拷贝） |
 | 搜索 API | SearXNG（自建，免费）/ Tavily，统一接口 | 低成本优先走搜索，浏览器兜底 |
 | 正文抽取 | httpx + trafilatura | 静态页面无需启动浏览器 |
 | 消息网关 | 裁剪移植 hermes-agent `gateway/`：微信 = 腾讯 iLink Bot API（HTTP 长轮询），QQ = 官方 Bot API v2（WebSocket + REST）；httpx + websockets | MIT 协议，成熟；见 [08-porting.md](08-porting.md) |
@@ -62,17 +62,22 @@ flowchart TD
 | core | `src/newsbot/core/` | 配置、日志、数据库、ORM 模型、错误类型、LLM 客户端 | `settings`、`get_logger()`、`session()`、`llm.chat()` |
 | gateway | `src/newsbot/gateway/` | 平台适配器（微信 / QQ）、白名单鉴权、聊天指令、入站路由、出站投递 | `BaseAdapter`、`MessageEvent`、`router.send()` |
 | dispatcher | `src/newsbot/dispatcher/` | 任务队列与 worker、超时重试取消、会话上下文、定时调度、执行流水线 | `queue.submit()`、`queue.cancel()`、`scheduler.sync()` |
-| agent | `src/newsbot/agent/` | 规划循环 + 工具（search / fetch / browse / newsdb） | `runner.run(query, ctx) -> Findings` |
+| agent | `src/newsbot/agent/` | 规划循环 + 工具（search / fetch / browser / newsdb） | `runner.run(query, ctx) -> Findings` |
 | result | `src/newsbot/result/` | 去重、引用编号、摘要成稿、按平台格式化与分段 | `dedup.filter()`、`report.build()` |
 | api | `src/newsbot/api/` | 管理后台 REST、登录鉴权、托管前端静态资源 | `/api/*` |
 | web | `web/` | 管理界面：仪表盘、任务、定时任务、资讯库、推送记录、设置 | — |
 
-### 4.1 Agent 内核设计（两层）
+### 4.1 Agent 内核设计
 
-1. **规划循环（runner）**：LLM tool-calling 循环，负责拆解问题、生成搜索词、挑选来源、判断信息是否充分。设有步数、token、耗时三重预算。
-2. **浏览器子 Agent（browse 工具）**：仅当页面是动态渲染 / 需要交互时调用 browser-use 执行子任务，返回提取到的文本。
+只有一个规划循环（`agent/runner.py`）：LLM tool-calling，负责拆解问题、生成检索词、判断信息是否充分、决定何时收手。设有步数与 token 预算。
 
-优先级：`newsdb`（已有）→ `search` → `fetch` → `browse`。大部分问题在前三步解决，浏览器作为兜底，显著降低耗时与成本。
+**提示词只给目标与底线，不给流程**（`agent/prompts.py`）：说明工具各自的能力、判断标准与不可协商的约束，具体用哪个工具、按什么顺序、用几次由模型自己判断。每步要求模型先用一两句话说明"打算查什么、为什么"——这既是可观测的规划产物（`runner.py` 记进日志），也让检索词的提炼归位到规划阶段。
+
+**检索词由模型负责提炼**（`agent/tools/search.py`）：工具只按空白与标点切词并逐个匹配，不做停用词过滤、同义改写或窗口切分。部分命中时如实反馈"哪些词没有任何条目同时包含"，让模型据此改写检索词——把反馈信号删掉，规划能力就永远长不出来。
+
+**浏览器不套子 Agent**（`agent/tools/browser.py`）：`browser` 工具把 browser-use 的动作原语（open / click / type / scroll / keys / back / tabs / switch / text）直接交给主 Agent，由它自己看页面元素编号并决定下一步。浏览器侧因此**不需要任何 LLM 调用**。会话启动后会先探测 CDP 是否真的可用再返回（`start()` 返回不代表能接受指令）；连接类错误会丢弃会话并在下次调用重建；失败原因按"会话断开 / 页面拒绝 / 超时 / 元素编号失效"分类后回灌，让模型能决定重试、换页面还是换工具。
+
+优先级：`newsdb`（已有）→ `search` → `fetch` → `browser`。大部分问题在前三步解决，浏览器只在需要登录态、动态渲染或交互时使用。
 
 ### 4.2 执行流水线
 
@@ -182,7 +187,7 @@ api, gateway  →  dispatcher  →  agent, result  →  core
 | 密钥泄露 | 仅存 `.env`；日志脱敏；`check.py` 扫描疑似密钥 |
 | 陌生人操控 bot | 网关白名单 + 配对码（参考 hermes `pairing.py`），未授权消息直接忽略 |
 | 网页提示注入 | 网页内容一律视为不可信数据，作为工具结果传入并标注；Agent 无 shell / 写文件类工具 |
-| SSRF | `fetch` / `browse` 禁止访问内网与回环地址，限制协议为 http/https |
+| SSRF | `fetch` / `browser` 禁止访问内网与回环地址，限制协议为 http/https |
 | 管理后台暴露 | 默认仅监听 `127.0.0.1`；口令登录 + HttpOnly / SameSite Cookie；修改类接口校验 CSRF |
 | SQL 注入 | 一律使用 ORM / 参数化查询 |
 | 资源失控 | 任务超时、浏览器步数上限、单任务 token 预算、下载禁用 |

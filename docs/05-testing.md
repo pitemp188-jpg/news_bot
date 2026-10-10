@@ -38,7 +38,7 @@ NEWSBOT_SOAK_SECONDS=60 NEWSBOT_SOAK_INTERVAL=10 \
 | `llm.py` · `FakeLLM` | 按脚本依次返回预设回复 / tool_call，校验调用次数 |
 | `adapter.py` · `FakeAdapter` | 模拟平台收发，记录发送内容，可注入断线 |
 | `search.py` · `FakeSearch` | 返回固定搜索结果，指向 `tests/fixtures/pages/` |
-| `search.py` · `FakeBrowserRunner` | 浏览器子 Agent 替身，记录调用与并发峰值 |
+| `search.py` · `FakeBrowserRunner` | 浏览器驱动替身：按动作返回结果，记录动作与并发峰值 |
 
 外部 HTTP 统一用 `respx` mock，**单元测试禁止真实联网**（`conftest.py` 中全局禁用 socket）。
 `local_server` fixture 在回环地址上提供 `tests/fixtures/pages/`，供集成与 e2e 做真实抓取 / 浏览器访问；`NEWSBOT_DATA_DIR` 指向临时目录，避免污染 `data/`。
