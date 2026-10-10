@@ -31,6 +31,7 @@ $logDir = Join-Path $RootDir 'data\logs'
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
 $logFile = Join-Path $logDir 'watchdog.log'
 $consoleLog = Join-Path $logDir 'newsbot.console.log'
+$consoleErr = Join-Path $logDir 'newsbot.console.err'
 
 function Write-Log([string]$Message) {
     $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
@@ -53,6 +54,15 @@ function Start-Service {
         Write-Log 'ERROR 找不到 uv，无法启动服务（请确认 uv 在 PATH 中）'
         return $false
     }
+    # 控制台重定向文件不会轮转（app 自己的 data/logs/newsbot.log 会按天轮转）,
+    # 长跑时它会被 httpx 之类的 INFO 日志撑大，超过上限就清掉重来。
+    # 保留它的意义在于：服务在 setup_logging 生效之前就崩了的话，只有这里有线索。
+    foreach ($path in @($consoleLog, $consoleErr)) {
+        if ((Test-Path $path) -and (Get-Item $path).Length -gt 64MB) {
+            Write-Log ('INFO 控制台日志超过 64MB，清空 {0}' -f $path)
+            Remove-Item $path -Force -ErrorAction SilentlyContinue
+        }
+    }
     # 独立控制台 + Hidden：不依附当前终端，关掉终端/编辑器也不受影响。
     # 标准输出另写一个文件，避免和 app 自己的 newsbot.log 抢同一个句柄。
     Start-Process -FilePath $uv.Source `
@@ -60,7 +70,7 @@ function Start-Service {
         -WorkingDirectory $RootDir `
         -WindowStyle Hidden `
         -RedirectStandardOutput $consoleLog `
-        -RedirectStandardError (Join-Path $logDir 'newsbot.console.err')
+        -RedirectStandardError $consoleErr
     Write-Log 'INFO 已拉起 newsbot 服务'
     return $true
 }
