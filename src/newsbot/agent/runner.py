@@ -142,6 +142,10 @@ class Runner:
                 )
 
             messages.append(_assistant_message(reply.content, reply.tool_calls))
+            # 把模型这一步的规划记下来：它是"它打算查什么、为什么"的唯一可观测产物，
+            # 没有它就只能从日志里冒出整句检索词来事后推断规划失败（实测踩过）
+            if plan := (reply.content or "").strip():
+                logger.info("第 %d 步规划: %s", step, plan)
             for call in reply.tool_calls:
                 result = await self._invoke(call)
                 registry.register(result.sources)

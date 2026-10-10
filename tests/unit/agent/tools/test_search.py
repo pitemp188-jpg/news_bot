@@ -17,12 +17,11 @@ import respx
 from newsbot.agent.tools.search import (
     BING_ENDPOINT,
     SearchTool,
-    _keywords,
-    _phrases,
     clean_snippet,
     match_feed_items,
     parse_bing,
     parse_feed,
+    query_tokens,
 )
 from newsbot.core.config import AgentSection, Secrets
 from newsbot.core.errors import RetriableError
@@ -295,9 +294,9 @@ def test_match_feed_items_reports_partial_match() -> None:
     items = [{"title": "AI 工具推荐", "url": "https://a/2", "snippet": "", "published": ""}]
     hits, note = match_feed_items(items, "AI 芯片", limit=5)
     assert len(hits) == 1
-    # 必须如实说明只匹配了部分关键词，否则用户会以为结果都关于芯片
+    # 必须如实说明哪些词没命中——这是 Agent 决定"改写检索词还是收手"的依据
     assert "芯片" in note
-    assert "只匹配到其余关键词" in note
+    assert "只命中了其余的词" in note
 
 
 def test_match_feed_items_reports_no_match_but_returns_latest() -> None:
@@ -307,74 +306,48 @@ def test_match_feed_items_reports_no_match_but_returns_latest() -> None:
     ]
     hits, note = match_feed_items(items, "量子计算", limit=5)
     assert [hit["url"] for hit in hits] == ["https://a/2", "https://a/1"], "未命中时给最新条目"
-    assert "没有匹配该关键词" in note
+    assert "请改写检索词" in note
 
 
-def test_match_feed_items_ignores_function_words_in_whole_sentence() -> None:
-    # 实测：Agent 把整句问话当关键词传进来，功能词参与匹配导致
-    # 「没有同时包含『新闻、今天、重要』的条目」这种误导性提示
+# ── 工具只检索，不猜意图 ──
+# 曾经的做法是让工具剥功能词、切 3 字窗口"猜"用户想查什么。那是把规划职责塞进
+# 工具：猜中了模型学不到该怎么写检索词，猜错了结果不可用，而且模型再也收不到
+# "检索词没写好"的反馈。下面这组用例把新契约固定下来。
+
+
+def test_query_tokens_only_splits_never_guesses() -> None:
+    # 只切分：不删功能词、不做同义改写、不切窗口
+    assert query_tokens("今天有哪些重要的 AI 新闻？") == ["今天有哪些重要的", "AI", "新闻"]
+    assert query_tokens("具身智能机器人产业") == ["具身智能机器人产业"]
+    assert query_tokens("") == []
+    assert query_tokens("，。！ ") == []
+
+
+def test_whole_sentence_gets_honest_feedback_not_silent_rewrite() -> None:
+    # 整句问话是一个 token，匹配不到就该如实反馈，而不是被工具偷偷改写成能命中的词
+    items = [{"title": "具身智能公司完成融资", "url": "https://a/1", "snippet": "", "published": ""}]
+    hits, note = match_feed_items(items, "今天有哪些重要的具身智能新闻？", limit=5)
+    assert [hit["url"] for hit in hits] == ["https://a/1"], "未命中时给最新条目兜底"
+    assert "请改写检索词" in note, "必须把'检索词没写好'这件事告诉模型"
+
+
+def test_core_tokens_give_precise_hits() -> None:
+    # 模型把检索词提炼好时，命中就该是精确的
     items = [
+        {"title": "无关内容", "url": "https://a/1", "snippet": "", "published": ""},
         {
             "title": "具身智能公司完成融资",
-            "url": "https://a/1",
+            "url": "https://a/2",
             "snippet": "",
             "published": "2026-10-09T09:00:00+00:00",
         },
-        {"title": "无关内容", "url": "https://a/2", "snippet": "", "published": "2026-10-09T08:00:00+00:00"},
     ]
-    hits, note = match_feed_items(items, "今天有哪些重要的具身智能新闻？", limit=5)
-    assert [hit["url"] for hit in hits] == ["https://a/1"]
-    assert note == "", "功能词不该被当成缺失的关键词报出来"
-
-
-def test_match_feed_items_still_reports_real_missing_keyword() -> None:
-    # 剔除功能词不能把"真的少了一个实词"这件事一起吞掉
-    items = [{"title": "AI 与具身智能公司完成融资", "url": "https://a/1", "snippet": "", "published": ""}]
-    _, note = match_feed_items(items, "今天有哪些 AI 芯片新闻？", limit=5)
-    assert "芯片" in note
-
-
-def test_match_feed_items_falls_back_when_only_function_words() -> None:
-    # 整句都是功能词时不能返回空关键词表，否则退化成"返回最新内容"还带一遍无关提示
-    items = [{"title": "有哪些新闻", "url": "https://a/1", "snippet": "", "published": ""}]
-    hits, note = match_feed_items(items, "有哪些新闻", limit=5)
-    assert [hit["url"] for hit in hits] == ["https://a/1"]
+    hits, note = match_feed_items(items, "具身智能 融资", limit=5)
+    assert [hit["url"] for hit in hits] == ["https://a/2"]
     assert note == ""
 
 
-@pytest.mark.parametrize(
-    ("query", "expected"),
-    [
-        ("今天有哪些重要的人工智能新闻？请给出 3 条要点", ["人工智能"]),
-        ("AI 芯片", ["AI", "芯片"]),
-        ("量子计算", ["量子计算"]),
-        # 整句只剩一个内容词时也要能剥干净，否则整句进匹配永远不命中
-        ("具身智能机器人产业最新进展如何", ["具身智能机器人产业", "进展"]),
-    ],
-)
-def test_phrases_keep_only_content_words(query: str, expected: list[str]) -> None:
-    assert _phrases(query) == expected
-
-
-def test_keywords_expand_long_words_for_matching() -> None:
-    # 没有分词器时整串长词不可能出现在标题里，切窗后才有机会命中
-    words = _keywords("具身智能机器人产业")
-    assert "具身智能机器人产业" in words
-    assert "机器人" in words
-    assert all(len(word) >= 2 for word in words)
-
-
-def test_long_word_windows_do_not_leak_into_note() -> None:
-    items = [{"title": "某公司发布机器人新品", "url": "https://a/1", "snippet": "", "published": ""}]
-    query = "具身智能机器人产业 融资"
-    hits, note = match_feed_items(items, query, limit=5)
-    assert [hit["url"] for hit in hits] == ["https://a/1"], "长词切窗应让它能命中"
-    # 提示语只能出现内容词，不能出现「能机器」这类切出来的窗口片段
-    quoted = note.split("「")[1].split("」")[0].split("、")
-    assert all(word in _phrases(query) for word in quoted)
-
-
-def test_ascii_keywords_require_word_boundary() -> None:
+def test_ascii_tokens_require_word_boundary() -> None:
     # 英文源里几乎每篇都含 said/email/chain，子串匹配会把「AI」变成万能匹配
     items = [
         {"title": "He said the email chain failed", "url": "https://a/1", "snippet": "", "published": ""},
@@ -419,7 +392,26 @@ def test_clean_snippet_thresholds(raw: str, expected_empty: bool) -> None:
 
 
 @respx.mock
-async def test_feeds_provider_does_not_wait_for_slow_feed(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_feeds_provider_contains_single_feed_failure() -> None:
+    # 单个源挂掉不能拖垮整次检索，其余源仍要返回结果
+    good = "https://good.example/feed"
+    bad = "https://bad.example/feed"
+    respx.get(good).mock(return_value=httpx.Response(200, text=FEED_FIXTURE.read_text(encoding="utf-8")))
+    respx.get(bad).mock(side_effect=httpx.ConnectTimeout("超时"))
+
+    tool = SearchTool(
+        AgentSection(search_results=3),
+        Secrets(search_provider="feeds"),
+        feeds=[good, bad],
+    )
+    result = await tool.run("厄尔尼诺")
+    assert result.sources, "好源的结果必须保留"
+    assert all(source.url.startswith("http") for source in result.sources)
+    await tool.aclose()
+
+
+@respx.mock
+async def test_feeds_provider_does_not_wait_for_slow_feed() -> None:
     # hnrss 实测会挂 20～36 秒，而检索必须等所有源返回；单源超时必须让它被放弃
     good = "https://good.example/feed"
     slow = "https://slow.example/feed"
