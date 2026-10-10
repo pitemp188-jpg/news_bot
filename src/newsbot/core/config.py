@@ -67,8 +67,10 @@ class ScheduleSection(BaseModel):
 
 
 class AgentSection(BaseModel):
-    max_steps: int = 12
-    max_tokens: int = 60000
+    # 规划循环与预算。max_tokens 是**累计**的（每步都把 prompt+completion 累加），
+    # 循环里 prompt 会随对话增长，所以 50 步大体对应 100 万 token 的量级
+    max_steps: int = 50
+    max_tokens: int = 1_000_000
     fetch_max_bytes: int = 2_000_000
     search_results: int = 8
     browser_concurrency: int = 1

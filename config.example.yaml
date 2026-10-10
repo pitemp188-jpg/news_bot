@@ -16,8 +16,8 @@ schedule:
   dedup_days: 7 # 与近 N 天已推送内容去重
 
 agent:
-  max_steps: 12 # 规划循环最大步数
-  max_tokens: 60000 # 单任务 token 预算
+  max_steps: 50 # 规划循环最大步数
+  max_tokens: 1000000 # 单任务累计 token 预算（每步累加 prompt+completion）
   fetch_max_bytes: 2000000
   search_results: 8
   browser_concurrency: 1 # 浏览器子任务并发
