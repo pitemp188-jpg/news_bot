@@ -190,7 +190,7 @@ api, gateway  →  dispatcher  →  agent, result  →  core
 | SSRF | `fetch` / `browser` 禁止访问内网与回环地址，限制协议为 http/https |
 | 管理后台暴露 | 默认仅监听 `127.0.0.1`；口令登录 + HttpOnly / SameSite Cookie；修改类接口校验 CSRF |
 | SQL 注入 | 一律使用 ORM / 参数化查询 |
-| 资源失控 | 任务超时、浏览器步数上限、单任务 token 预算、下载禁用 |
+| 资源失控 | 任务超时、单次浏览器动作时限、agent 步数与 token 预算、下载禁用 |
 
 ## 11. 非功能要求
 
