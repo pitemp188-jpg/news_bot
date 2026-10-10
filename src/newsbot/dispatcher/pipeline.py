@@ -23,14 +23,6 @@ from newsbot.result.dedup import Deduper, Item, content_digest, simhash64, simha
 logger = get_logger(__name__)
 
 
-def _keep(deduper: Deduper, item: Item) -> bool:
-    """重复来源返回 False；新来源登记指纹后返回 True。"""
-    if deduper.is_duplicate(item):
-        return False
-    deduper.remember(item)
-    return True
-
-
 class Runner(Protocol):
     """Agent 规划循环：查询 → 带来源的采集结果。"""
 
@@ -140,7 +132,11 @@ class Pipeline:
         logger.info("任务 #%d 记录 %d 次模型调用用量", task.id, len(usages))
 
     async def _drop_duplicates(self, findings: Any) -> None:
-        """与近期已推送内容比对，剔除重复来源；全是旧闻时直接说明。"""
+        """同一件事的多家报道只留质量最高的一条；与近期推送重复的也一并剔除。
+
+        判据是**内容**而不是来源：不同媒体报同一件事要合并，同一家媒体的两条不同
+        新闻要都留下。保留哪一条由 `Deduper.keep_indexes` 按信息量与来源权重决定。
+        """
         if self._deduper is None:
             return
         sources = list(getattr(findings, "sources", None) or [])
@@ -149,25 +145,33 @@ class Pipeline:
         deduper = await self._deduper()
         if deduper is None:
             return
-        items = [Item(title=str(item.get("title", "")), url=str(item.get("url", ""))) for item in sources]
-        kept = [source for source, item in zip(sources, items, strict=True) if _keep(deduper, item)]
-        if len(kept) == len(items):
+        items = [
+            Item(
+                title=str(item.get("title", "")),
+                url=str(item.get("url", "")),
+                text=str(item.get("snippet", "") or ""),
+                weight=float(item.get("weight", 1.0) or 1.0),
+            )
+            for item in sources
+        ]
+        kept_indexes = deduper.keep_indexes(items)
+        if len(kept_indexes) == len(items):
             return
-        dropped = [source for source, item in zip(sources, items, strict=True) if source not in kept]
-        logger.info("去重过滤 %d 条重复来源", len(items) - len(kept))
-        if not kept:
+        dropped = [source for index, source in enumerate(sources) if index not in kept_indexes]
+        logger.info("去重合并 %d 条重复内容（%d → %d）", len(items) - len(kept_indexes), len(items), len(kept_indexes))
+        if not kept_indexes:
             findings.sources = []
-            findings.answer = f"{findings.answer}\n\n（以上来源均与近期推送重复，已去重。）".strip()
+            findings.answer = f"{findings.answer}\n\n（以上来源彼此重复，已合并。）".strip()
             return
-        findings.sources = kept
+        findings.sources = [sources[index] for index in kept_indexes]
         # 编号存在来源里，所以剔除后不会错位；但正文仍会引用已被剔除的编号，
         # 必须在开头就说明，否则读者看到正文里的 [S4] 却在来源列表里找不到它
         marks = [str(item.get("label", "") or "") for item in dropped if item.get("label")]
         if marks:
             listed = f"{marks[0]}–{marks[-1]}" if len(marks) > 2 else "、".join(marks)
             findings.answer = (
-                f"（注：本次检索到的 {len(dropped)} 条来源（{listed}）与近期推送重复，"
-                f"未重复列出；正文引用这些编号时，指上期已推送过的内容。）\n\n{findings.answer}"
+                f"（注：本次检索到的 {len(dropped)} 条来源（{listed}）与已保留的来源讲的是同一件事，"
+                f"已合并；正文引用这些编号时，内容与对应编号相同。）\n\n{findings.answer}"
             ).strip()
 
     async def _store_sources(self, sources: list[dict[str, str]]) -> None:
@@ -185,7 +189,8 @@ class Pipeline:
                 for item, digest in zip(sources, url_hashes, strict=True):
                     if not digest or digest in existing:
                         continue
-                    body = str(item.get("title") or item.get("url") or "")
+                    # 入库用的内容要与去重时的判据一致（标题 + 摘要），否则历史指纹永远命中不了
+                    body = f"{item.get('title', '')} {item.get('snippet', '')}".strip() or str(item.get("url", ""))
                     session.add(
                         NewsItem(
                             url=str(item.get("url", "")),

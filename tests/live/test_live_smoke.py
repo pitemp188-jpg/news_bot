@@ -176,7 +176,7 @@ async def test_live_smoke_chat_query_and_schedule(live_app) -> None:
     await _replies(adapter)
     pushed = "\n".join(text for _chat, text, _ in adapter.sent)
     assert pushed.strip(), "定时任务没有推送任何内容"
-    assert "已去重" in pushed or STABLE_URL.rstrip("/") in pushed, pushed
+    assert "已合并" in pushed or STABLE_URL.rstrip("/") in pushed, pushed
 
     async with app.db.session() as session:
         deliveries = list((await session.execute(select(Delivery))).scalars())

@@ -116,7 +116,7 @@ async def test_scenario_chat_query(tmp_path: Path, local_server: str) -> None:
 
         await adapter.emit("再查一次 AI", chat_id="u1", user_id="u1")
         await _wait_tasks(app, 2)
-        assert any("已去重" in text for _chat, text, _reply in adapter.sent)
+        assert any("已合并" in text for _chat, text, _reply in adapter.sent)
         async with app.db.session() as session:
             assert len(list((await session.execute(select(NewsItem))).scalars())) == 1
     finally:

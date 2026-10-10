@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 import httpx
 
 from newsbot.agent.tools.base import Source, ToolResult
-from newsbot.core.config import AgentSection, Secrets
+from newsbot.core.config import AgentSection, FeedSource, Secrets, default_feeds
 from newsbot.core.errors import RetriableError
 from newsbot.core.log import get_logger
 
@@ -30,16 +30,6 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 BING_ENDPOINT = "https://www.bing.com/search"
-# 订阅源兜底列表：只放实测可直连、且给出真实文章地址的源
-# （36Kr 与机器之心的 /feed 在本环境返回 0 条，故未收录）
-DEFAULT_FEEDS = (
-    "https://www.qbitai.com/feed",
-    "https://www.infoq.cn/feed",
-    "https://www.ifanr.com/feed",
-    "https://www.solidot.org/index.rss",
-    "https://techcrunch.com/feed/",
-    "https://hnrss.org/frontpage",
-)
 # 单个订阅源的最长等待：hnrss 实测会挂 20～36 秒，而检索必须等所有源返回，
 # 不给单源设上限就会让一次搜索白等半分钟
 DEFAULT_FEED_TIMEOUT = 8.0
@@ -70,6 +60,13 @@ SNIPPET_OUTPUT_CHARS = 140
 # 各源在 description 里夹带的推广尾巴（爱范儿等），保留它只会污染日报
 _PROMO = re.compile(r"#?\s*欢迎关注.{0,60}?(?:微信公众号|公众号|微信号)[^\n]*", re.S)
 _BOILERPLATE = re.compile(r"^(?:点击)?(?:查看|阅读)?(?:原文|详情|全文)[>》]?$")
+# 营销/导购条目：Wired 的 RSS 里实测 10 条有 6 条是优惠券导购（"LG Promo Codes…"、
+# "30% Off Canon…"），Tom's Hardware 也有 "Save $200 on… amazon deal" 这类。
+# 它们没有任何资讯价值，留着只会挤掉真正的内容。
+_LOW_QUALITY = re.compile(
+    r"promo\s*codes?|coupon|discount\s*codes?|优惠券|折扣码|\bsave \$?\d|amazon deal|best deals?\b",
+    re.I,
+)
 
 # 检索词切分：只按空白与标点切，不做任何"猜用户想查什么"的处理。
 # 提炼检索词是 Agent 规划阶段的职责；工具猜不了的（猜中了也解释不清为什么），
@@ -201,6 +198,10 @@ def parse_feed(text: str, source: str) -> list[dict[str, str]]:
         url = _tidy_url(_tag(block, "link") if is_rss else _atom_link(block))
         if not url.startswith("http"):
             continue
+        title = _tag(block, "title") or url
+        # 导购/营销内容不是资讯：留着只会挤掉真正的内容（实测 Wired 的 feed 里占六成）
+        if _LOW_QUALITY.search(title):
+            continue
         summary = _tag(block, "description") or _tag(block, "summary") or _tag(block, "content")
         items.append(
             {
@@ -243,8 +244,13 @@ def _hit(token: str, text: str) -> bool:
     return token in text
 
 
-def _score(item: dict[str, str], tokens: list[str]) -> int:
-    """相关度：命中的 token 越多分越高；标题命中比摘要命中权重高。"""
+def _score(item: dict[str, Any], tokens: list[str]) -> float:
+    """相关度：命中的 token 越多分越高；标题命中比摘要命中权重高。
+
+    再乘来源权重：同一件事被多家报道时，权重高的先出现，去重阶段也就先把
+    高质量的那条占住位置。权重只做**排序的次级因素**——相关度是主要依据，
+    否则一个权威源只要沾一个词就会压过真正相关的条目。
+    """
     title = item["title"].lower()
     snippet = item["snippet"].lower()
     score = 0
@@ -253,11 +259,11 @@ def _score(item: dict[str, str], tokens: list[str]) -> int:
             score += 2
         elif _hit(token, snippet):
             score += 1
-    return score
+    return score * float(item.get("weight", 1.0))
 
 
-def match_feed_items(items: list[dict[str, str]], query: str, limit: int) -> tuple[list[dict[str, str]], str]:
-    """按检索词过滤订阅源条目，并按发布时间次级排序；返回（结果, 反馈）。
+def match_feed_items(items: list[dict[str, Any]], query: str, limit: int) -> tuple[list[dict[str, Any]], str]:
+    """按检索词过滤订阅源条目，并按相关度 → 发布时间排序；返回（结果, 反馈）。
 
     订阅源是"最新内容流"而不是搜索索引，常常只命中部分检索词。反馈必须如实说
     清楚**哪些词没命中**，这是 Agent 决定"改写检索词还是收手"的唯一依据——
@@ -266,11 +272,11 @@ def match_feed_items(items: list[dict[str, str]], query: str, limit: int) -> tup
     tokens = [token.lower() for token in query_tokens(query)]
     scored = [(item, _score(item, tokens)) for item in items]
     matched = [(item, score) for item, score in scored if score > 0]
-    pool = matched or [(item, 0) for item in items]
+    pool = matched or [(item, 0.0) for item in items]
     pool.sort(key=lambda pair: (pair[1], pair[0]["published"] or ""), reverse=True)
 
     seen: set[str] = set()
-    unique: list[dict[str, str]] = []
+    unique: list[dict[str, Any]] = []
     for item, _ in pool:
         if item["url"] in seen:
             continue
@@ -317,7 +323,7 @@ class SearchTool:
         settings: AgentSection,
         secrets: Secrets,
         *,
-        feeds: list[str] | None = None,
+        feeds: list[FeedSource] | None = None,
         feed_concurrency: int = 4,
         client: httpx.AsyncClient | None = None,
         timeout: float = 20.0,
@@ -325,7 +331,7 @@ class SearchTool:
     ) -> None:
         self._settings = settings
         self._secrets = secrets
-        self._feeds = list(feeds if feeds is not None else DEFAULT_FEEDS)
+        self._feeds = list(feeds) if feeds is not None else default_feeds()
         self._feed_concurrency = max(1, feed_concurrency)
         self._timeout = timeout
         # 单个源的最长等待：实测 hnrss 会挂 20～36 秒，而检索要等所有源返回，
@@ -354,11 +360,24 @@ class SearchTool:
         blocks = []
         for index, hit in enumerate(hits, 1):
             snippet = hit["snippet"][:SNIPPET_OUTPUT_CHARS]
-            parts = [f"{index}. {hit['title']}", f"   {hit['url']}"]
+            # 标出来源名：Agent 判断"这条够不够权威、要不要再找个一手来源"要靠它。
+            # 必须放在标题行——`SourceRegistry.render` 靠"编号行 + 下一页纯网址行"
+            # 这个结构把局部编号换成全局编号，网址行带上任何后缀都会让改写失效，
+            # 正文引用与来源列表就会错位（实测踩过一次）
+            origin = hit.get("source") or _host(hit["url"])
+            parts = [f"{index}. {hit['title']}（{origin}）", f"   {hit['url']}"]
             if snippet.strip():
                 parts.append(f"   {snippet}")
             blocks.append("\n".join(parts))
-        sources = [Source(title=hit["title"], url=hit["url"]) for hit in hits]
+        sources = [
+            Source(
+                title=hit["title"],
+                url=hit["url"],
+                snippet=hit["snippet"],
+                weight=float(hit.get("weight", 1.0)),
+            )
+            for hit in hits
+        ]
         body = "\n".join(blocks)
         return ToolResult(text=f"{note}\n{body}".strip() if note else body, sources=sources)
 
@@ -372,26 +391,20 @@ class SearchTool:
             return await self._feeds_provider(query)
         return await self._searxng(query, time_range), ""
 
-    async def _feeds_provider(self, query: str) -> tuple[list[dict[str, str]], str]:
+    async def _feeds_provider(self, query: str) -> tuple[list[dict[str, Any]], str]:
         """并发拉取订阅源，按关键词过滤：来源是筛选过的质量源，且给出真实文章地址。"""
         if not self._feeds:
             logger.warning("未配置任何订阅源，feeds 提供方无法工作")
             return [], ""
         gate = asyncio.Semaphore(self._feed_concurrency)
 
-        async def fetch(url: str) -> list[dict[str, str]]:
+        async def fetch(feed: FeedSource) -> list[dict[str, Any]]:
             async with gate:
-                try:
-                    response = await asyncio.wait_for(
-                        self._http().get(url, headers={"User-Agent": USER_AGENT}), timeout=self._feed_timeout
-                    )
-                    response.raise_for_status()
-                except Exception as exc:  # 单个源失败或超时都不该拖垮整次检索
-                    logger.warning("订阅源拉取失败 %s: %s", url, exc)
-                    return []
-                return parse_feed(response.text, _host(url))
+                items = await self._fetch_feed(feed)
+                # 权重挂在条目上，随结果一路带到排序与去重
+                return [{**item, "weight": feed.weight} for item in items]
 
-        batches = await asyncio.gather(*(fetch(url) for url in self._feeds))
+        batches = await asyncio.gather(*(fetch(feed) for feed in self._feeds))
         hits, note = match_feed_items(
             [item for batch in batches for item in batch], query, self._settings.search_results
         )
@@ -401,6 +414,34 @@ class SearchTool:
         if note:
             logger.info("订阅源检索提示: %s", note)
         return hits, note
+
+    async def _fetch_feed(self, feed: FeedSource) -> list[dict[str, str]]:
+        """拉取并解析单个订阅源；返回空列表表示这次没拿到。
+
+        超时**不重试**：实测慢源（hnrss 实测挂 20～36 秒）会一直慢，重试只是让整次
+        检索多等一个超时周期。连接类错误**重试一次**：连续检索时实测会出现"整批里
+        几个源同时失败"，那是瞬时抖动，不该当成源不可用。
+        """
+        for attempt in (1, 2):
+            try:
+                response = await asyncio.wait_for(
+                    self._http().get(feed.url, headers={"User-Agent": USER_AGENT}), timeout=self._feed_timeout
+                )
+                response.raise_for_status()
+            except (TimeoutError, httpx.TimeoutException):
+                # 写成两个类型：`asyncio.wait_for` 抛的是内置 TimeoutError，而 httpx
+                # 自己抛的 ReadTimeout / ConnectTimeout 与它没有继承关系（实测踩过：
+                # 只捕获内置 TimeoutError 会让 httpx 超时被当成可重试的连接错误）
+                logger.warning("订阅源超时 %s（上限 %.1fs），跳过", feed.url, self._feed_timeout)
+                return []
+            except Exception as exc:
+                if attempt == 1:
+                    await asyncio.sleep(0.3)
+                    continue
+                logger.warning("订阅源拉取失败 %s: %s: %s", feed.url, type(exc).__name__, exc)
+                return []
+            return parse_feed(response.text, _host(feed.url))
+        return []
 
     async def _bing(self, query: str) -> list[dict[str, str]]:
         """抓 Bing 结果页并解析：零配置可用，代价是依赖页面结构。"""

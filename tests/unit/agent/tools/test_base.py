@@ -12,7 +12,17 @@ from newsbot.agent.tools.base import Source, ToolResult, tool_schema
 
 
 def test_source_serializes_to_dict() -> None:
-    assert Source(title="标题", url="https://a.example").as_dict() == {"title": "标题", "url": "https://a.example"}
+    """摘要与权重必须带进来源字典：去重靠它们判断同事件并挑出保留哪一条。"""
+    source = Source(title="标题", url="https://a.example")
+    assert source.as_dict() == {"title": "标题", "url": "https://a.example", "weight": 1.0}
+
+    enriched = Source(title="标题", url="https://a.example", snippet="摘要内容", weight=1.2)
+    assert enriched.as_dict() == {
+        "title": "标题",
+        "url": "https://a.example",
+        "snippet": "摘要内容",
+        "weight": 1.2,
+    }
 
 
 def test_failure_result_is_marked() -> None:
