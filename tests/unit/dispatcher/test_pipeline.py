@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -115,11 +116,15 @@ async def test_dedup_keeps_source_labels_aligned(tmp_path: Path) -> None:
 
     实测缺陷：编号曾与 sources 分成两个平行列表，去重把 14 条删到 2 条后编号
     整体前移，正文的 [S2] 指到了另一篇文章上。编号现在存在来源自身里。
+
+    用 scheduled 是必须的：按历史剔除只对定时推送生效（手动提问是用户当下想看，
+    不该因为"已推送过"就不给来源）。
     """
     db = await _make_db(tmp_path)
     try:
+        # 正文只引用新的那条：被引用的编号有保护集，不会因为"已推送过"被剔除
         findings = Findings(
-            answer="结论 [S9] [S14]",
+            answer="结论 [S14]",
             sources=[
                 {"title": "旧的", "url": "https://example.com/dup", "label": "S9"},
                 {"title": "新的", "url": "https://example.com/new", "label": "S14"},
@@ -139,18 +144,16 @@ async def test_dedup_keeps_source_labels_aligned(tmp_path: Path) -> None:
             sessions=SessionStore(db),
             deduper=fresh,
         )
-        task_id = await _make_task(db)
+        task_id = await _make_task(db, kind="scheduled")
         async with db.session() as session:
             task = await session.get(Task, task_id)
             assert task is not None
             content = await pipeline.execute(session, task)
 
+        # 关键断言是"编号没有前移"：S14 仍叫 S14，不会被重编成 S1
         assert "S14. 新的 https://example.com/new" in content
-        assert "S9. " not in content.split("）")[-1]
-        # 被剔除的编号要如实说明，而且必须前置：读者先看到正文的 [S9] 才找来源就晚了
-        assert content.startswith("（注：")
-        assert "S9" in content.split("\n\n")[0]
-        assert "已合并" in content
+        # 与历史重复且未被正文引用的来源不再列出
+        assert "S9. " not in content
     finally:
         await db.dispose()
 
@@ -160,7 +163,7 @@ async def test_semantic_grouping_merges_rewrites_across_languages(tmp_path: Path
     db = await _make_db(tmp_path)
     try:
         findings = Findings(
-            answer="结论 [S1] [S2] [S3]",
+            answer="结论 [S1] [S3]",
             sources=[
                 {
                     "title": "Musk 与 Ambani 就 Starlink 印度牌照公开互怼",
@@ -202,7 +205,6 @@ async def test_semantic_grouping_merges_rewrites_across_languages(tmp_path: Path
             await pipeline.execute(session, task)
 
         assert [item["label"] for item in findings.sources] == ["S1", "S3", "S4"]
-        assert "已合并" in findings.answer
 
         # 语义分组也是一次模型调用，用量必须落库，否则后台成本统计会漏
         async with db.session() as session:
@@ -340,7 +342,7 @@ async def test_same_story_is_merged_keeping_the_richest_source(tmp_path: Path) -
     db = await _make_db(tmp_path)
     try:
         findings = Findings(
-            answer="结论 [S1] [S2] [S3]",
+            answer="结论 [S2] [S3]",
             sources=[
                 {
                     "title": "某公司发布 Qwen-Image-2.1-Turbo",
@@ -384,6 +386,93 @@ async def test_same_story_is_merged_keeping_the_richest_source(tmp_path: Path) -
 
         kept = [item["label"] for item in findings.sources]
         assert kept == ["S2", "S3"], "同一件事留下信息最全的那条；另一件事不受影响"
-        assert "S1" in findings.answer.split("\n\n")[0]
+    finally:
+        await db.dispose()
+
+
+async def test_cited_labels_are_never_dropped(tmp_path: Path) -> None:
+    """正文引用过的编号一律保留——引用悬空是硬规则禁止的（回归用例）。
+
+    实测缺陷：正文写了 `[S1] [S11] [S16] [S17] [S20]`，而去重把 S1/S11/S16 剔除，
+    来源列表里只剩 S17/S20，读者无法核对其中三条。根因是按历史剔除对手动提问也
+    生效（问的是"刚看过的同一话题"，于是整批来源被当成"已推送过"）。现在两层保证：
+    手动提问不做历史剔除，且正文引用过的编号有保护集兜底。
+    """
+    db = await _make_db(tmp_path)
+    try:
+        findings = Findings(
+            answer="结论 [S31] [S32]",
+            sources=[
+                {"title": "同一件事的简讯", "url": "https://short.example/1", "snippet": "简讯。", "label": "S31"},
+                {
+                    "title": "同一件事的详版",
+                    "url": "https://long.example/2",
+                    "snippet": "Qwen-Image-2.1-Turbo 是 8 步出图的 7B 图像模型，已在 ModelScope 开源。",
+                    "label": "S32",
+                },
+            ],
+        )
+        # 模型明确说这两条是同一件事，但正文同时引用了两个编号
+        llm = FakeLLM(replies=[reply("1,2")])
+
+        async def fresh() -> Deduper:
+            return Deduper(grouper=StoryGrouper(llm, min_items=2))
+
+        pipeline = Pipeline(
+            db,
+            runner=FakeRunner(findings=findings),
+            reporter=ReportBuilder(),
+            sender=FakeSender(),
+            sessions=SessionStore(db),
+            deduper=fresh,
+        )
+        async with db.session() as session:
+            task = await session.get(Task, await _make_task(db))
+            assert task is not None
+            content = await pipeline.execute(session, task)
+
+        labels = [item["label"] for item in findings.sources]
+        assert labels == ["S31", "S32"], f"被正文引用的编号不能剔除，实际保留 {labels}"
+        for label in re.findall(r"\[S(\d+)\]", findings.answer):
+            assert f"S{label}. " in content, f"正文引用了 S{label}，但来源列表里没有它"
+    finally:
+        await db.dispose()
+
+
+async def test_uncited_duplicate_is_still_merged(tmp_path: Path) -> None:
+    """保护集只保护被引用的：没被正文引用的重复来源照常合并（否则去重就废了）。"""
+    db = await _make_db(tmp_path)
+    try:
+        findings = Findings(
+            answer="结论 [S32]",
+            sources=[
+                {"title": "同一件事的简讯", "url": "https://short.example/1", "snippet": "简讯。", "label": "S31"},
+                {
+                    "title": "同一件事的详版",
+                    "url": "https://long.example/2",
+                    "snippet": "Qwen-Image-2.1-Turbo 是 8 步出图的 7B 图像模型，已在 ModelScope 开源。",
+                    "label": "S32",
+                },
+            ],
+        )
+        llm = FakeLLM(replies=[reply("1,2")])
+
+        async def fresh() -> Deduper:
+            return Deduper(grouper=StoryGrouper(llm, min_items=2))
+
+        pipeline = Pipeline(
+            db,
+            runner=FakeRunner(findings=findings),
+            reporter=ReportBuilder(),
+            sender=FakeSender(),
+            sessions=SessionStore(db),
+            deduper=fresh,
+        )
+        async with db.session() as session:
+            task = await session.get(Task, await _make_task(db))
+            assert task is not None
+            await pipeline.execute(session, task)
+
+        assert [item["label"] for item in findings.sources] == ["S32"]
     finally:
         await db.dispose()

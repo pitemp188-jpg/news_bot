@@ -224,6 +224,21 @@ def is_digest(item: Item) -> bool:
 
 
 @dataclass
+class Merge:
+    """一次去重的结果。
+
+    区分两种"被合并"：与本次检索里的其他条目重复（`replaced_by` 指向取代它的那个），
+    以及与近期已推送的内容重复（`from_history`，本批次里没有可对照的编号）。
+    正文引用了被合并掉的编号时，必须能告诉读者**去看哪个编号**——只说"已合并"
+    读者核对不了（实测：正文引用 S31，而 S31 被合并、列表里没有，读者无法对账）。
+    """
+
+    kept: list[int] = field(default_factory=list)
+    replaced_by: dict[int, int] = field(default_factory=dict)
+    from_history: list[int] = field(default_factory=list)
+
+
+@dataclass
 class Deduper:
     """内容去重：同一 URL、逐字转载、同一件事只留一条。
 
@@ -300,6 +315,20 @@ class Deduper:
         跟其中一条合并会连带丢掉其余几条。它仍会参与词法判据，但只按"网址或正文
         完全相同"判重（见 `_same_as_kept` / `is_duplicate`）。
         """
+        merge = await self.merge(items)
+        return merge.kept
+
+    async def merge(self, items: list[Item], protect: set[int] | None = None) -> Merge:
+        """同 `keep()`，但额外给出"被合并的下标 → 取代它的下标"。
+
+        调用方需要这个映射：正文引用了被合并掉的编号时，光说"已合并"读者核对不了，
+        必须告诉它"看哪个编号"。
+
+        `protect` 是**一律保留**的下标（调用方传"正文引用过的编号"）。理由：正文
+        已经写了 `[S1]`，把 S1 剔掉就等于制造引用悬空——读者在来源列表里找不到它，
+        这正是项目要求杜绝的情况（实测发生过：正文引用 S1/S11/S16，三者都被剔除，
+        列表里只剩 S17/S20）。
+        """
         grouping = Grouping()
         if self.grouper is not None:
             candidates = [index for index, item in enumerate(items) if not is_digest(item)]
@@ -309,13 +338,15 @@ class Deduper:
                 groups={candidates[position]: tag for position, tag in local.groups.items()},
                 usage=local.usage,
             )
-        kept = self.keep_indexes(items, groups=grouping.groups)
+        merge = self.keep_indexes(items, groups=grouping.groups, protect=protect)
         if grouping.usage is not None:
             self.usages.append(grouping.usage)
-        return kept
+        return merge
 
-    def keep_indexes(self, items: list[Item], groups: dict[int, int] | None = None) -> list[int]:
-        """返回应当保留的下标（升序）；重复项的下标不在其中。
+    def keep_indexes(
+        self, items: list[Item], groups: dict[int, int] | None = None, protect: set[int] | None = None
+    ) -> Merge:
+        """算出保留哪些下标，以及每个被合并的下标由谁取代。
 
         判定顺序按质量从高到低：质量高的先"占位"，之后与它重复的才被判为重复。
         同一件事的多家报道因此留下的是信息最全、来源最权威的那条，输出顺序仍是
@@ -324,21 +355,34 @@ class Deduper:
         `groups` 是语义分组给出的"下标 → 组号"（见 `StoryGrouper`）：同组视为
         同一件事。它只影响"要不要合并"，不影响"保留哪一条"。
         """
+        guarded = set(protect or ())
         order = sorted(range(len(items)), key=lambda index: self._quality(items[index]), reverse=True)
         kept: list[int] = []
+        replaced_by: dict[int, int] = {}
+        from_history: list[int] = []
         for index in order:
             item = items[index]
+            if index in guarded:
+                # 正文引用过它，必须留下——否则引用悬空
+                kept.append(index)
+                continue
             # 与历史指纹比对走索引（历史可能有几千条，逐条算相似度太慢），
             # 与本次已占位的条目比对用完整内容判据
-            if self.is_duplicate(item) or any(
-                self._same_as_kept(item, items[other]) or same_group(index, other, groups) for other in kept
-            ):
+            if self.is_duplicate(item):
+                from_history.append(index)
+                continue
+            match = next(
+                (other for other in kept if self._same_as_kept(item, items[other]) or same_group(index, other, groups)),
+                None,
+            )
+            if match is not None:
+                replaced_by[index] = match
                 continue
             kept.append(index)
         kept.sort()
         for index in kept:
             self.remember(items[index])
-        return kept
+        return Merge(kept=kept, replaced_by=replaced_by, from_history=sorted(from_history))
 
     @staticmethod
     def _same_as_kept(item: Item, other: Item) -> bool:
@@ -360,7 +404,7 @@ class Deduper:
 
     def filter(self, items: list[Item]) -> list[Item]:
         """返回未重复的条目（保持传入顺序）。"""
-        return [items[index] for index in self.keep_indexes(items)]
+        return [items[index] for index in self.keep_indexes(items).kept]
 
     async def load_recent(self, db: Database, days: int) -> int:
         """载入近 N 天已入库资讯的指纹，避免与历史推送重复。

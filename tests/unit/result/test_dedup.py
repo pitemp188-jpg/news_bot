@@ -225,8 +225,7 @@ def test_keep_indexes_merges_same_story_and_keeps_richest() -> None:
             weight=1.0,
         ),
     ]
-    kept = deduper.keep_indexes(items)
-    assert kept == [1], "留下信息量更大的那条，而不是只有标题的那条"
+    assert deduper.keep_indexes(items).kept == [1], "留下信息量更大的那条，而不是只有标题的那条"
 
 
 def test_keep_indexes_cannot_merge_without_a_shared_identifier() -> None:
@@ -240,7 +239,7 @@ def test_keep_indexes_cannot_merge_without_a_shared_identifier() -> None:
         Item(title="某公司发布新图像模型", url="https://a.example/1"),
         Item(title="某公司推出图像生成模型", url="https://b.example/2"),
     ]
-    assert deduper.keep_indexes(items) == [0, 1]
+    assert deduper.keep_indexes(items).kept == [0, 1]
 
 
 def test_keep_indexes_keeps_different_news_from_same_source() -> None:
@@ -255,7 +254,7 @@ def test_keep_indexes_keeps_different_news_from_same_source() -> None:
             text="双方在社交平台上交锋",
         ),
     ]
-    assert deduper.keep_indexes(items) == [0, 1, 2]
+    assert deduper.keep_indexes(items).kept == [0, 1, 2]
 
 
 def test_keep_indexes_prefers_authoritative_source_when_tied() -> None:
@@ -265,7 +264,7 @@ def test_keep_indexes_prefers_authoritative_source_when_tied() -> None:
         Item(title="推理成本一年降七成", url="https://low.example/1", text=body, weight=0.7),
         Item(title="推理成本一年降七成", url="https://high.example/2", text=body, weight=1.2),
     ]
-    assert deduper.keep_indexes(items) == [1], "信息量并列时保留更权威的来源"
+    assert deduper.keep_indexes(items).kept == [1], "信息量并列时保留更权威的来源"
 
 
 def test_keep_indexes_preserves_input_order() -> None:
@@ -275,7 +274,7 @@ def test_keep_indexes_preserves_input_order() -> None:
         Item(title="新", url="https://a.example/2"),
         Item(title="旧", url="https://a.example/1?utm_source=x"),
     ]
-    assert deduper.keep_indexes(items) == [0, 1]
+    assert deduper.keep_indexes(items).kept == [0, 1]
 
 
 def test_keep_indexes_uses_history_loaded_from_db() -> None:
@@ -283,7 +282,7 @@ def test_keep_indexes_uses_history_loaded_from_db() -> None:
     deduper = Deduper()
     deduper.remember(Item(title="阿里发布 Qwen-Image-2.1-Turbo 图像模型", url="https://old.example/1"))
     items = [Item(title="Qwen-Image-2.1-Turbo 开源", url="https://new.example/2", text="8 步出图")]
-    assert deduper.keep_indexes(items) == []
+    assert deduper.keep_indexes(items).kept == []
 
 
 # ── 语义分组：模型只判"是不是同一件事"，取舍仍由确定性规则决定 ──
