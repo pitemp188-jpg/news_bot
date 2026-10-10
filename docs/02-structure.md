@@ -22,6 +22,7 @@ news_bot/
 ├── migrations/                  # Alembic 迁移脚本
 ├── scripts/
 │   ├── check.py                 # 统一质量检查入口（lint/类型/规则/测试）
+│   ├── watchdog.ps1             # 进程看护：服务掉了就拉起（长跑用）
 │   └── hooks/                   # git hooks：pre-commit、commit-msg
 ├── src/newsbot/
 │   ├── __main__.py              # CLI：run / login / notify / migrate
