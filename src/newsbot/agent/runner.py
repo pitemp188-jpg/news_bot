@@ -43,7 +43,12 @@ class SourceRegistry:
             if not url or url in self._by_url:
                 continue
             self._by_url[url] = len(self._ordered) + 1
-            self._ordered.append(source.as_dict())
+            entry = source.as_dict()
+            # 编号写进来源本身，而不是另开一个平行数组：一旦有谁过滤/切分 sources
+            # （实测流水线的去重就会把 14 条删到 2 条），平行数组立刻错位，
+            # 正文的 [S2] 会指到另一篇文章上。编号随来源走就不可能错位。
+            entry["label"] = f"S{len(self._ordered) + 1}"
+            self._ordered.append(entry)
 
     def label(self, url: str) -> str:
         number = self._by_url.get(str(url or "").strip())
@@ -72,7 +77,7 @@ class SourceRegistry:
 
     @property
     def labels(self) -> list[str]:
-        return [f"S{number}" for number in range(1, len(self._ordered) + 1)]
+        return [str(item.get("label", "")) for item in self._ordered]
 
 
 @dataclass
@@ -86,8 +91,11 @@ class Findings:
     budget_exhausted: bool = False
     # 每次模型调用的用量，由调用方（流水线）写入 llm_usage
     usages: list[Usage] = field(default_factory=list)
-    # 与 sources 一一对应的稳定编号（S1、S2…），投递时用它渲染来源列表
-    labels: list[str] = field(default_factory=list)
+
+    @property
+    def labels(self) -> list[str]:
+        """与 sources 对齐的编号；编号本身存在每个来源里，不会错位。"""
+        return [str(item.get("label", "")) for item in self.sources]
 
 
 def _assistant_message(content: str, calls: list[ToolCall]) -> dict[str, Any]:
@@ -128,7 +136,6 @@ class Runner:
                 return Findings(
                     answer=reply.content.strip(),
                     sources=registry.entries,
-                    labels=registry.labels,
                     steps=step,
                     tokens=tokens,
                     usages=usages,
@@ -171,8 +178,7 @@ class Runner:
         entries = registry.entries
         if entries:
             listed = "\n".join(
-                f"- [{label}] {item['title']} {item['url']}"
-                for label, item in zip(registry.labels, entries, strict=True)
+                f"- [{item.get('label', '')}] {item['title']} {item['url']}" for item in entries[:MAX_LISTED_SOURCES]
             )
             answer = f"已达到{reason}，未能给出完整结论。已收集到以下来源：\n{listed}"
         else:
@@ -180,7 +186,6 @@ class Runner:
         return Findings(
             answer=answer,
             sources=entries,
-            labels=registry.labels,
             steps=steps,
             tokens=tokens,
             budget_exhausted=True,

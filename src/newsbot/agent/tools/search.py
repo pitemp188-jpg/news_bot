@@ -40,6 +40,9 @@ DEFAULT_FEEDS = (
     "https://techcrunch.com/feed/",
     "https://hnrss.org/frontpage",
 )
+# 单个订阅源的最长等待：hnrss 实测会挂 20～36 秒，而检索必须等所有源返回，
+# 不给单源设上限就会让一次搜索白等半分钟
+DEFAULT_FEED_TIMEOUT = 8.0
 # Bing 结果块；旧结构用 li.b_algo，同时兼容 b_algo 出现在 div 上的情况
 _BING_BLOCK = re.compile(
     r'<(?:li|div)[^>]*class="[^"]*\bb_algo\b[^"]*".*?(?=<(?:li|div)[^>]*class="[^"]*\bb_algo\b|</ol>)', re.S
@@ -67,6 +70,73 @@ SNIPPET_OUTPUT_CHARS = 140
 # 各源在 description 里夹带的推广尾巴（爱范儿等），保留它只会污染日报
 _PROMO = re.compile(r"#?\s*欢迎关注.{0,60}?(?:微信公众号|公众号|微信号)[^\n]*", re.S)
 _BOILERPLATE = re.compile(r"^(?:点击)?(?:查看|阅读)?(?:原文|详情|全文)[>》]?$")
+
+# 检索词切分：标点一律当分隔符，因为中文没有词边界
+_KEYWORD_SPLIT = re.compile(r"[，。！？、；：（）「」【】《》,\.!\?;:()\[\]\"'“”‘’]+")
+# 功能词：它们不携带检索信息，却会让"多词同时命中"这条判据永远失败。
+# 实测整句问话被当成关键词时，输出里会出现「订阅源里没有同时包含『新闻、
+# 今天、重要』的条目」——用户读到会以为什么都没搜到。
+STOPWORDS = frozenset(
+    {
+        "今天",
+        "今日",
+        "昨天",
+        "明天",
+        "最近",
+        "最新",
+        "目前",
+        "现在",
+        "重要",
+        "有哪些",
+        "哪些",
+        "什么",
+        "怎么",
+        "如何",
+        "多少",
+        "是否",
+        "请",
+        "帮我",
+        "给出",
+        "汇总",
+        "总结",
+        "整理",
+        "梳理",
+        "列出",
+        "要点",
+        "摘要",
+        "来源",
+        "链接",
+        "编号",
+        "引用",
+        "标注",
+        "说明",
+        "新闻",
+        "资讯",
+        "消息",
+        "报道",
+        "动态",
+        "相关",
+        "关于",
+        "一下",
+        "一些",
+        "一个",
+        "以及",
+        "同时",
+        "的",
+        "了",
+        "吗",
+        "呢",
+        "和",
+        "与",
+    }
+)
+# 只在词内部剥离多字功能词：单字功能词（的、和、与）会咬坏「目的地」「和平」
+# 这类真正的词，所以整片段等于它时才算功能词；片段首尾的单字功能词单独收尾处理
+_INNER_STOPWORDS = tuple(sorted((word for word in STOPWORDS if len(word) > 1), key=len, reverse=True))
+_EDGE_CHARS = "的了和与吗呢"
+# 长于这个长度的中文词按 3 字窗口切片段参与匹配：没有分词器时，「具身智能机器人
+# 产业」整串永远不可能出现在标题里，但其中「机器人」应当能命中
+LONG_WORD_CHARS = 4
 
 
 def _unwrap(url: str) -> str:
@@ -211,11 +281,56 @@ def _host(url: str) -> str:
     return match.group(1).removeprefix("www.") if match else url
 
 
+def _phrases(query: str) -> list[str]:
+    """剥掉功能词后剩下的内容词，用于判断"哪几个词没被命中"。
+
+    整句问话直接当关键词会让"今天""重要""有哪些"参与匹配：多词同时命中的判据
+    必然失败，输出里还会出现「订阅源里没有同时包含『新闻、今天、重要』的条目」，
+    让人误以为一篇都没搜到。这里先按标点切、再在片段内部剥掉多字功能词，最后
+    丢掉纯数字与单字残渣。筛完什么都不剩时退回按标点切的原片段，保证不比以前差。
+    """
+    cleaned = _KEYWORD_SPLIT.sub(" ", query)
+    parts = [part.strip() for part in cleaned.split() if part.strip()]
+    phrases: list[str] = []
+    for part in parts:
+        core = part
+        for word in _INNER_STOPWORDS:
+            core = core.replace(word, " ")
+        for chunk in core.split():
+            # 片段首尾的单字功能词（「的人工智能」）要去掉，但不碰「目的地」这类词：
+            # 只有长度大于 2 才允许裁剪，裁完至少还剩两个字
+            if len(chunk) > 2:
+                chunk = chunk.strip(_EDGE_CHARS)
+            if len(chunk) > 1 and chunk.lower() not in STOPWORDS:
+                phrases.append(chunk)
+    return phrases or [part for part in parts if len(part) > 1] or [query.strip()]
+
+
 def _keywords(query: str) -> list[str]:
-    """切关键词：中文没有词边界，所以整串与按标点空白切分后的片段都算。"""
-    cleaned = re.sub(r"[，。！？、；：（）「」【】,\.!\?;:()\[\]\"']+", " ", query)
-    parts = [part for part in cleaned.split() if part]
-    return parts or [query.strip()]
+    """打分用关键词：内容词再加上长词的 3 字窗口。
+
+    没有分词器时「具身智能机器人产业」这种整串不可能出现在任何标题里，切成窗口
+    后「机器人」「智能机」这类片段才有机会命中。窗口只用于打分排序，不用于判断
+    哪个词没命中——否则提示语会被一堆无意义片段淹没。
+    """
+    words: list[str] = []
+    for phrase in _phrases(query):
+        words.append(phrase)
+        if len(phrase) > LONG_WORD_CHARS and phrase.isascii() is False:
+            words.extend(phrase[index : index + 3] for index in range(len(phrase) - 2))
+    return words
+
+
+def _hit(word: str, text: str) -> bool:
+    """判断关键词是否真的出现在文本里。
+
+    中文按子串判断（没有词边界），ASCII 关键词必须要求两侧不是字母数字：否则
+    「AI」会命中 said、email、chain、openai 里的字母组合——TechCrunch 与 HN 这些
+    英文源里几乎每篇都含 said/email，等于把「AI」变成了万能匹配。
+    """
+    if word.isascii():
+        return re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
+    return word in text
 
 
 def _score(item: dict[str, str], query: str, keywords: list[str]) -> int:
@@ -228,14 +343,14 @@ def _score(item: dict[str, str], query: str, keywords: list[str]) -> int:
     snippet = item["snippet"].lower()
     phrase = query.strip().lower()
     score = 0
-    if phrase and phrase in title:
+    if phrase and _hit(phrase, title):
         score += 4
-    elif phrase and phrase in snippet:
+    elif phrase and _hit(phrase, snippet):
         score += 2
     for word in keywords:
-        if word in title:
+        if _hit(word, title):
             score += 2
-        elif word in snippet:
+        elif _hit(word, snippet):
             score += 1
     return score
 
@@ -247,6 +362,7 @@ def match_feed_items(items: list[dict[str, str]], query: str, limit: int) -> tup
     （实测「AI 芯片」在没有芯片新闻时只能命中「AI」），不说明就会让用户误以为
     结果全都是关于该话题的。
     """
+    phrases = _phrases(query)
     keywords = [word.lower() for word in _keywords(query) if word.strip()]
     scored = [(item, _score(item, query, keywords)) for item in items]
     matched = [(item, score) for item, score in scored if score > 0]
@@ -265,9 +381,11 @@ def match_feed_items(items: list[dict[str, str]], query: str, limit: int) -> tup
 
     if not matched:
         return unique, "订阅源里没有匹配该关键词的条目，以下是各源最新内容："
-    hit_words = {word for word in keywords if any(word in (i["title"] + i["snippet"]).lower() for i, _ in matched)}
-    missing = [word for word in keywords if word not in hit_words]
-    if missing and len(keywords) > 1:
+    hit_words = {
+        word for word in phrases if any(_hit(word.lower(), (i["title"] + i["snippet"]).lower()) for i, _ in matched)
+    }
+    missing = [word for word in phrases if word not in hit_words]
+    if missing and len(phrases) > 1:
         return unique, f"订阅源里没有同时包含「{'、'.join(missing)}」的条目，以下是只匹配到其余关键词的内容："
     return unique, ""
 
@@ -280,7 +398,10 @@ class SearchTool:
     parameters: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "搜索关键词"},
+            "query": {
+                "type": "string",
+                "description": "检索关键词，2～5 个词（例如「具身智能 融资」）；不要传整句问话，也不要用「今天/重要/有哪些」这类无检索价值的词",
+            },
             "time_range": {
                 "type": "string",
                 "enum": ["day", "week", "month"],
@@ -299,12 +420,16 @@ class SearchTool:
         feed_concurrency: int = 4,
         client: httpx.AsyncClient | None = None,
         timeout: float = 20.0,
+        feed_timeout: float | None = None,
     ) -> None:
         self._settings = settings
         self._secrets = secrets
         self._feeds = list(feeds if feeds is not None else DEFAULT_FEEDS)
         self._feed_concurrency = max(1, feed_concurrency)
         self._timeout = timeout
+        # 单个源的最长等待：实测 hnrss 会挂 20～36 秒，而检索要等所有源返回，
+        # 不给单源设上限就会让一次搜索白等半分钟。默认取总超时的 40%。
+        self._feed_timeout = feed_timeout if feed_timeout is not None else min(timeout * 0.4, DEFAULT_FEED_TIMEOUT)
         self._client = client
         self._owns_client = client is None
 
@@ -356,9 +481,11 @@ class SearchTool:
         async def fetch(url: str) -> list[dict[str, str]]:
             async with gate:
                 try:
-                    response = await self._http().get(url, headers={"User-Agent": USER_AGENT})
+                    response = await asyncio.wait_for(
+                        self._http().get(url, headers={"User-Agent": USER_AGENT}), timeout=self._feed_timeout
+                    )
                     response.raise_for_status()
-                except Exception as exc:  # 单个源失败不该拖垮整次检索
+                except Exception as exc:  # 单个源失败或超时都不该拖垮整次检索
                     logger.warning("订阅源拉取失败 %s: %s", url, exc)
                     return []
                 return parse_feed(response.text, _host(url))

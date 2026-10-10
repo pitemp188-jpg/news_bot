@@ -19,7 +19,6 @@ from newsbot.result.report import ReportBuilder, add_source_list, format_for_pla
 class Findings:
     answer: str = "结论 [1]"
     sources: list[dict[str, str]] = field(default_factory=list)
-    labels: list[str] = field(default_factory=list)
 
 
 def _task(query: str = "今天 AI 新闻") -> Task:
@@ -29,24 +28,35 @@ def _task(query: str = "今天 AI 新闻") -> Task:
 def test_add_source_list_numbers_sources() -> None:
     text = add_source_list("结论 [1]", [{"title": "标题", "url": "https://a.example/1"}])
     assert text.startswith("结论 [1]\n\n来源：")
-    assert "1. 标题 https://a.example/1" in text
+    assert "S1. 标题 https://a.example/1" in text
 
 
 def test_add_source_list_skips_when_empty() -> None:
     assert add_source_list("结论", []) == "结论"
 
 
-def test_add_source_list_uses_global_labels() -> None:
-    # 正文里写的 [S3] 必须指向列表里标着 S3 的那条
-    sources = [{"title": "标题", "url": "https://a.example/1"}]
-    text = add_source_list("结论 [S3]", sources, ["S3"])
-    assert "S3. 标题 https://a.example/1" in text
-    assert "\n1. " not in text
+def test_add_source_list_uses_label_embedded_in_source() -> None:
+    # 编号存在来源里：上游剔除几条来源后，剩下的编号不会整体前移
+    sources = [
+        {"title": "标题", "url": "https://a.example/1", "label": "S9"},
+        {"title": "标题2", "url": "https://a.example/2", "label": "S14"},
+    ]
+    text = add_source_list("结论 [S14]", sources)
+    assert "S9. 标题 https://a.example/1" in text
+    assert "S14. 标题2 https://a.example/2" in text
+    assert "S1. " not in text
+    assert "S2. " not in text
+
+
+def test_add_source_list_falls_back_to_position() -> None:
+    # 没有 label 的来源（例如别处构造的）按位置编号，不能空着
+    text = add_source_list("结论", [{"title": "标题", "url": "https://a.example/1"}])
+    assert "S1. 标题 https://a.example/1" in text
 
 
 def test_add_source_list_keeps_all_sources() -> None:
     # 过去截断到 10 条，会把正文引用的来源直接删掉
-    sources = [{"title": f"标题{i}", "url": f"https://a.example/{i}"} for i in range(1, 16)]
+    sources = [{"title": f"标题{i}", "url": f"https://a.example/{i}", "label": f"S{i}"} for i in range(1, 16)]
     text = add_source_list("结论", sources)
     for index in range(1, 16):
         assert f"S{index}. 标题{index}" in text
@@ -69,12 +79,12 @@ def test_format_for_platform_plain_only_for_weixin() -> None:
 
 async def test_build_uses_findings_answer_and_sources() -> None:
     findings = Findings(
-        answer="本周三个变化 [S1]", sources=[{"title": "标题", "url": "https://a.example/1"}], labels=["S1"]
+        answer="本周三个变化 [S1]", sources=[{"title": "标题", "url": "https://a.example/1", "label": "S1"}]
     )
     built = await ReportBuilder().build(_task(), findings)
     assert built.content.startswith("本周三个变化 [S1]")
     assert "S1. 标题 https://a.example/1" in built.content
-    assert built.sources == [{"title": "标题", "url": "https://a.example/1"}]
+    assert built.sources == [{"title": "标题", "url": "https://a.example/1", "label": "S1"}]
 
 
 async def test_build_truncates_long_content() -> None:
@@ -86,8 +96,8 @@ async def test_build_truncates_long_content() -> None:
 
 async def test_truncation_never_drops_sources() -> None:
     # 截断只能砍正文：来源列表被砍掉会让正文引用直接指向空气
-    sources = [{"title": f"标题{i}", "url": f"https://a.example/{i}"} for i in range(1, 8)]
-    findings = Findings(answer="长" * 5000, sources=sources, labels=[f"S{i}" for i in range(1, 8)])
+    sources = [{"title": f"标题{i}", "url": f"https://a.example/{i}", "label": f"S{i}"} for i in range(1, 8)]
+    findings = Findings(answer="长" * 5000, sources=sources)
     built = await ReportBuilder(max_chars=400).build(_task(), findings)
     assert "内容过长已截断" in built.content
     for index in range(1, 8):
