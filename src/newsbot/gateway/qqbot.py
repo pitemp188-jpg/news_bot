@@ -34,7 +34,8 @@ CONNECT_TIMEOUT = 15.0
 # 只订阅单聊与群 @ 消息，避免因权限不足触发 4014
 INTENTS = 1 << 25
 RECONNECT_BACKOFF = (2, 5, 15, 30, 60)
-MAX_RECONNECT_ATTEMPTS = 5
+# 连续重连到这个次数之后只把日志降级为 warning，**不停止重连**（见 _listen_loop）
+RECONNECT_WARN_ATTEMPTS = 5
 QUICK_DISCONNECT_SECONDS = 5.0
 MAX_QUICK_DISCONNECTS = 3
 RATE_LIMIT_WAIT = 30.0
@@ -264,7 +265,11 @@ class QQBotAdapter(BaseAdapter):
                         self._running = False
                         return
                 else:
+                    # 连接实打实用了一段时间才断：这是网络抖动，不是配置问题，
+                    # 重连计数必须清零。不清零的话计数会跨"多次健康连接"累加，
+                    # 挂机一整天（休眠唤醒、网关滚动重启）攒够 5 次就永久离线了。
                     quick_disconnects = 0
+                    backoff_index = 0
                 if exc.code in FATAL_CLOSE_CODES:
                     logger.error("[qqbot] 不可恢复关闭码 %s: %s", exc.code, FATAL_CLOSE_CODES[exc.code])
                     self._running = False
@@ -284,10 +289,14 @@ class QQBotAdapter(BaseAdapter):
                 if not self._running:
                     return
                 logger.warning("[qqbot] WebSocket 异常: %s", exc)
-            if backoff_index >= MAX_RECONNECT_ATTEMPTS:
-                logger.error("[qqbot] 超过最大重连次数，停止重连")
-                self._running = False
-                return
+            if backoff_index >= RECONNECT_WARN_ATTEMPTS:
+                # 只降级日志，**绝不放弃重连**：这个进程要挂机跑一整天，必须能自愈。
+                # 原来这里是"超过 5 次就 self._running = False 退出循环"，而计数只在
+                # 连接正常返回时才清零，于是 24 小时里攒够 5 次抖动（休眠唤醒、网关
+                # 滚动重启）机器人就永久离线——**进程还活着**，只看进程存活的监控
+                # 根本发现不了。真正需要"停机"的信号是"反复瞬间断开"（配置/权限错，
+                # 由 MAX_QUICK_DISCONNECTS 处理）与不可恢复关闭码（FATAL_CLOSE_CODES）。
+                logger.warning("[qqbot] 已连续重连 %d 次仍未恢复，继续重试", backoff_index)
             delay = RECONNECT_BACKOFF[min(backoff_index, len(RECONNECT_BACKOFF) - 1)]
             backoff_index += 1
             logger.info("[qqbot] %.0fs 后重连（第 %d 次）", delay, backoff_index)

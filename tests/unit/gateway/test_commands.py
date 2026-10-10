@@ -101,10 +101,86 @@ async def test_subscribe_uses_default_and_explicit_time(harness: Harness) -> Non
     assert all(row.platform == "fake" and row.chat_id == "c1" and row.enabled for row in rows)
 
 
+async def test_subscribe_accepts_multiword_topic(harness: Harness) -> None:
+    """主题可以带空格——「github 热榜」是一个主题，不能把第二个词当成时间。
+
+    实测缺陷：原实现取 `parts[1]` 当时间，于是 /订阅 github 热榜 会把「热榜」当
+    时间并报 "时间格式应为 HH:MM"，用户想安排"每晚给我 github 热榜"根本做不到。
+    """
+    reply = await harness.send("/订阅 github 热榜")
+    assert reply is not None and "github 热榜" in reply
+    rows = await harness.schedules()
+    assert [(row.cron, row.topics) for row in rows] == [("0 21 * * *", ["github 热榜"])]
+
+
+async def test_subscribe_accepts_hour_only_and_trailing_time(harness: Harness) -> None:
+    hour_only = await harness.send("/订阅 github热榜 9")
+    assert hour_only is not None and "每天 09:00" in hour_only
+    trailing = await harness.send("/订阅 具身智能 融资 22:45")
+    assert trailing is not None and "每天 22:45" in trailing
+    rows = await harness.schedules()
+    assert [(row.cron, row.topics) for row in rows] == [
+        ("0 9 * * *", ["github热榜"]),
+        ("45 22 * * *", ["具身智能 融资"]),
+    ]
+
+
+async def test_subscribe_accepts_multiple_topics(harness: Harness) -> None:
+    """多个主题用逗号分隔：每个主题各自成一条检索。"""
+    reply = await harness.send("/订阅 AI,芯片 20:00")
+    assert reply is not None and "AI、芯片" in reply
+    rows = await harness.schedules()
+    assert rows[0].topics == ["AI", "芯片"]
+
+
+async def test_subscribe_lists_existing(harness: Harness) -> None:
+    """`/订阅` 无参数要列出已有订阅——用户需要确认"我已经安排过什么"。"""
+    empty = await harness.send("/订阅")
+    assert empty is not None and "没有定时推送" in empty
+
+    await harness.send("/订阅 github 热榜 22:00")
+    await harness.send("/订阅 AI 的热点")
+    listing = await harness.send("/订阅")
+    assert listing is not None
+    assert "1. github 热榜（每天 22:00）" in listing
+    assert "2. AI 的热点（每天 21:00）" in listing
+
+
+async def test_subscribe_notifies_scheduler(harness: Harness) -> None:
+    """订阅变更必须通知调度器，否则新订阅要到重启才生效（回归用例）。"""
+    synced = []
+
+    async def on_change() -> None:
+        synced.append(True)
+
+    harness.commands._on_schedule_change = on_change  # type: ignore[attr-defined]
+    await harness.send("/订阅 半导体")
+    assert synced == [True]
+
+    # 退订同样要通知：否则作业留在调度器里继续触发
+    await harness.send("/退订 1")
+    assert len(synced) == 2
+
+
 async def test_subscribe_rejects_bad_time(harness: Harness) -> None:
     reply = await harness.send("/订阅 半导体 25:61")
     assert reply is not None and "HH:MM" in reply
     assert await harness.schedules() == []
+
+
+async def test_subscribe_rejects_hour_out_of_range(harness: Harness) -> None:
+    """纯数字的末尾也当时间看，不能静默变成主题「半导体 99」。"""
+    reply = await harness.send("/订阅 半导体 99")
+    assert reply is not None and "HH:MM" in reply
+    assert await harness.schedules() == []
+
+
+async def test_subscribe_with_only_a_number_keeps_it_as_topic(harness: Harness) -> None:
+    """只给了一个数字、没有主题时，不能变成"没有主题的订阅"。"""
+    reply = await harness.send("/订阅 9")
+    assert reply is not None and "9" in reply
+    rows = await harness.schedules()
+    assert [(row.cron, row.topics) for row in rows] == [("0 21 * * *", ["9"])]
 
 
 async def test_unsubscribe_lists_and_disables(harness: Harness) -> None:

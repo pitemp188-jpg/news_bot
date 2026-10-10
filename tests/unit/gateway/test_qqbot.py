@@ -373,6 +373,86 @@ async def test_rate_limited_close_waits_then_reconnects(monkeypatch: pytest.Monk
     assert "reopen" in calls
 
 
+async def test_healthy_connection_resets_reconnect_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """连接实打实用过一段时间后断开，重连计数必须清零（回归用例）。
+
+    实测缺陷：计数只在 `_read_events()` 正常返回时才清零，而断开走的是异常路径，
+    于是计数跨"多次健康连接"累加——挂机一整天（休眠唤醒、网关滚动重启）攒够
+    上限就永久离线，进程却还活着。
+    """
+    adapter = _adapter(FakeWS())
+    adapter._running = True
+    seen_backoff: list[int] = []
+    calls: list[int] = []
+
+    async def sequence() -> None:
+        calls.append(1)
+        if len(calls) <= 3:
+            raise QQCloseError(1000, "")
+        adapter._running = False
+        return
+
+    async def record_sleep(_seconds: float = 0.0) -> None:
+        seen_backoff.append(len(calls))
+        return
+
+    async def reopen() -> None:
+        return
+
+    monkeypatch.setattr(adapter, "_read_events", sequence)
+    monkeypatch.setattr(adapter, "_open_ws", reopen)
+    monkeypatch.setattr(qq_module.asyncio, "sleep", record_sleep)
+    # 连接时长视为"非瞬时"，即每次都是健康连接后断开
+    monkeypatch.setattr(qq_module, "QUICK_DISCONNECT_SECONDS", 0.0)
+    await adapter._listen_loop()
+
+    assert adapter._running is False
+    assert len(calls) == 4, "每次断开都要重连，不能因计数累加而放弃"
+
+
+async def test_reconnect_never_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """连续大量失败也不停止重连：进程要挂机跑一整天，必须能自愈。
+
+    原来的实现超过 5 次就 `self._running = False`，机器人从此永久离线，
+    而进程还在——只看进程存活的监控发现不了。真正该停机的是"反复瞬间断开"
+    与不可恢复关闭码。
+    """
+    adapter = _adapter(FakeWS())
+    adapter._running = True
+    attempts = 0
+    opened = 0
+    delays: list[float] = []
+
+    async def sequence() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 40:
+            raise QQCloseError(1000, "")
+        adapter._running = False
+
+    async def instant(seconds: float = 0.0) -> None:
+        delays.append(seconds)
+        return None
+
+    async def reopen() -> None:
+        nonlocal opened
+        opened += 1
+
+    monkeypatch.setattr(adapter, "_read_events", sequence)
+    monkeypatch.setattr(adapter, "_open_ws", reopen)
+    monkeypatch.setattr(qq_module.asyncio, "sleep", instant)
+    # 把"瞬时断开"阈值设为负值，确保不走快速断开那条停机分支
+    monkeypatch.setattr(qq_module, "QUICK_DISCONNECT_SECONDS", -1.0)
+    await adapter._listen_loop()
+    assert attempts >= 40, f"不应在 {attempts} 次后放弃"
+    # 每次循环都必须真的重连一次、且睡眠一次：退避与重连若被写到 while 外，
+    # 就变成零延迟疯狂重连（会撞限流），而且 _running=False 后还会多连一次。
+    assert opened == attempts, f"重连次数 {opened} != 断开次数 {attempts}"
+    assert len(delays) == attempts, f"睡眠次数 {len(delays)} != {attempts}"
+    assert delays[0] == qq_module.RECONNECT_BACKOFF[0], "首次退避必须走最短间隔"
+    assert max(delays) <= qq_module.RECONNECT_BACKOFF[-1], "退避不得超上限"
+
+
 async def test_token_invalid_close_refreshes_token(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = _adapter(FakeWS())
     adapter._running = True
@@ -390,7 +470,7 @@ async def test_token_invalid_close_refreshes_token(monkeypatch: pytest.MonkeyPat
         return None
 
     async def reopen() -> None:
-        return None
+        return
 
     monkeypatch.setattr(adapter, "_read_events", sequence)
     monkeypatch.setattr(adapter, "_open_ws", reopen)
