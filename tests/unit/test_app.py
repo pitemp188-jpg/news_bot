@@ -14,7 +14,7 @@ from sqlalchemy import select
 from tests.fakes.adapter import FakeAdapter
 from tests.fakes.llm import FakeLLM, reply
 
-from newsbot.app import App
+from newsbot.app import App, run_service
 from newsbot.core.config import Config, ScheduleSection, Secrets
 from newsbot.core.models import Schedule, Task
 
@@ -205,3 +205,49 @@ async def test_stop_closes_agent_tools(tmp_path: Path) -> None:
     await app.start()
     await app.stop()
     assert browser.closed == 1, "服务关闭时必须回收 Agent 工具，否则浏览器进程会残留"
+
+
+async def test_run_service_configures_file_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run` 模式必须在组装 App 之前配置好日志。
+
+    实测缺陷：run_service 从未调用 setup_logging，于是根日志被 browser-use 的
+    logging_config 接管——它发现根日志空着就会清空并换上自己的格式。结果是长跑
+    模式既没有 data/logs/newsbot.log 落盘、也没有凭证脱敏，挂机一整天出问题时
+    无从排查。反过来，我们先装好 handler，那边的 setup_logging 会因为
+    hasHandlers() 为真而原样保留。
+    """
+    import logging
+    from logging.handlers import TimedRotatingFileHandler
+
+    class FakeConfig:
+        app = type("App", (), {"log_level": "INFO"})()
+        log_dir = tmp_path / "logs"
+
+        def ensure_ready(self) -> None:
+            return None
+
+    served: list[int] = []
+
+    class FakeApp:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        async def serve(self) -> None:
+            served.append(1)
+
+    monkeypatch.setattr("newsbot.core.log._configured", False)
+    monkeypatch.setattr("newsbot.core.config.get_config", lambda: FakeConfig())
+    monkeypatch.setattr("newsbot.app.App", FakeApp)
+
+    root = logging.getLogger()
+    original = root.handlers[:]
+    try:
+        assert await run_service() == 0
+        assert served, "服务本身仍要被启动"
+        assert any(isinstance(h, TimedRotatingFileHandler) for h in root.handlers), "必须有文件日志 handler"
+        assert (tmp_path / "logs" / "newsbot.log").exists()
+    finally:
+        for handler in root.handlers[:]:
+            if handler not in original:
+                root.removeHandler(handler)
+                handler.close()

@@ -104,7 +104,12 @@ async def test_scenario_scheduled_push(tmp_path: Path, local_server: str) -> Non
 
 
 async def test_scenario_chat_query(tmp_path: Path, local_server: str) -> None:
-    """场景二：聊天里直接提问——先回执，再异步投递结果；重复来源被去重。"""
+    """场景二：聊天里直接提问——先回执，再异步投递结果；同一来源不重复入库。
+
+    **手动提问不按历史去重**：用户当下在问，把来源当成"已推送过"而不给他，是错的
+    （实测同一话题连问两次，39 条来源被删到 9 条，正文引用的 5 个编号里 3 个消失）。
+    这里断言连问两次仍能拿到完整回答，且资讯库里不会重复入库。
+    """
     url = f"{local_server}/article.html"
     app, adapter = await _build_app(tmp_path, url, rounds=2)
     try:
@@ -116,7 +121,11 @@ async def test_scenario_chat_query(tmp_path: Path, local_server: str) -> None:
 
         await adapter.emit("再查一次 AI", chat_id="u1", user_id="u1")
         await _wait_tasks(app, 2)
-        assert any("已合并" in text for _chat, text, _reply in adapter.sent)
+        second = [text for _chat, text, _reply in adapter.sent[2:]]
+        assert second, adapter.sent
+        assert any("下降约三成" in text for text in second)
+        # 来源要列出来，不能被当成"已推送过"删掉
+        assert all("article.html" in text for text in second if "来源：" in text)
         async with app.db.session() as session:
             assert len(list((await session.execute(select(NewsItem))).scalars())) == 1
     finally:
