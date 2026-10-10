@@ -70,9 +70,24 @@ class LLMReply:
 
 
 class LLM(Protocol):
-    """Agent 与结果处理共用的模型接口，便于测试替换。"""
+    """Agent 与结果处理共用的模型接口，便于测试替换。
 
-    async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> LLMReply: ...
+    `max_tokens` 用于**机械型任务**（例如把讲同一件事的条目分组）：这类任务的输出
+    本该只有几个字符（`3,7`）。当前的模型是**推理模型**，同一件事它会先烧掉两千多个
+    推理 token 才给结论——实测一次分组用掉 2588 个 completion token，耗时 4.5～170s
+    不等。给出上限能把最坏情况压住。
+
+    注意上限给太小是有害的：推理 token 与输出 token 共用这个额度，实测上限 1000 时
+    推理把额度吃光、正文直接为空（调用成功但拿不到任何结果）。所以要留出余量。
+    """
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        max_tokens: int | None = None,
+    ) -> LLMReply: ...
 
     async def aclose(self) -> None: ...
 
@@ -139,11 +154,21 @@ class OpenAIClient:
         except OpenAIError as exc:
             raise FatalError(f"模型调用失败: {exc}") from exc
 
-    async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> LLMReply:
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        max_tokens: int | None = None,
+    ) -> LLMReply:
         payload: dict[str, Any] = {"model": self._model, "messages": messages}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        if max_tokens is not None:
+            # 必须用 max_completion_tokens：实测火山方舟这个端点**忽略 max_tokens**
+            # （传 50 仍然返回 3455 个 completion token），只认 max_completion_tokens
+            payload["max_completion_tokens"] = max_tokens
 
         last_error: NewsbotError | None = None
         for attempt in range(1, self._max_retries + 1):
