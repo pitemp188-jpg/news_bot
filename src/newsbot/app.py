@@ -33,7 +33,7 @@ from newsbot.gateway.commands import Commands
 from newsbot.gateway.qqbot import QQBotAdapter
 from newsbot.gateway.router import Router
 from newsbot.gateway.weixin import WeixinAdapter, WeixinStore
-from newsbot.result.dedup import Deduper
+from newsbot.result.dedup import Deduper, StoryGrouper
 from newsbot.result.report import ReportBuilder
 
 logger = get_logger(__name__)
@@ -269,6 +269,10 @@ class App:
         if days <= 0 or self.db is None:
             return None
         deduper = Deduper()
+        if self._config.schedule.dedup_with_llm and self._llm is not None:
+            # 语义分组只补词法判据的盲区（中文改写、无版本号的纯中文事件）；
+            # 分组失败会退回词法判据，所以这里是纯增强，不需要额外兜错
+            deduper.grouper = StoryGrouper(self._llm, timeout=self._config.schedule.dedup_llm_timeout_seconds)
         await deduper.load_recent(self.db, days)
         return deduper
 

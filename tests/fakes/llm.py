@@ -18,10 +18,20 @@ class FakeLLM:
 
     replies: list[LLMReply] = field(default_factory=list)
     calls: list[list[dict[str, Any]]] = field(default_factory=list)
+    # 收到的输出长度上限，供"机械型任务必须限长"这类断言使用
+    max_tokens_seen: list[int] = field(default_factory=list)
     closed: bool = False
 
-    async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> LLMReply:
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        max_tokens: int | None = None,
+    ) -> LLMReply:
         self.calls.append(messages)
+        if max_tokens is not None:
+            self.max_tokens_seen.append(max_tokens)
         return self.replies.pop(0) if self.replies else LLMReply()
 
     async def aclose(self) -> None:

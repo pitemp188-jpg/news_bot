@@ -14,15 +14,16 @@ schedule:
   default_topics:
     - AI
   dedup_days: 7 # 与近 N 天已推送内容去重
+  dedup_with_llm: true # 让模型判断"这几条是不是同一件事"（只做分组，保留哪条由规则定）
+  dedup_llm_timeout_seconds: 90 # 语义分组的超时
 
 agent:
   max_steps: 50 # 规划循环最大步数
   max_tokens: 1000000 # 单任务累计 token 预算（每步累加 prompt+completion）
   fetch_max_bytes: 2000000
   search_results: 8
-  browser_concurrency: 1 # 浏览器子任务并发
-  browser_max_steps: 10 # 浏览器子 Agent 自己的步数预算
-  browser_timeout_seconds: 120 # 单步模型调用与整步时限
+  browser_concurrency: 1 # 浏览器动作并发
+  browser_timeout_seconds: 120 # 单个浏览器动作的时限（浏览器侧不调用模型）
   browser_headless: true # 本地调试想看窗口时改 false
 
 delivery:
@@ -36,12 +37,22 @@ api:
 
 search:
   # 仅当 SEARCH_PROVIDER=feeds 时生效：订阅权威源的 RSS，按关键词过滤。
-  # 只收录实测可直连、且给出真实文章地址的源；列表按需增删。
+  # 只收录实测可直连、且给出真实文章地址的源。可以只写网址（等价于 weight=1.0），
+  # 也可以写成 {url, weight, topics} 给源打质量权重——权重既影响检索排序，
+  # 也是"同一件事的多家报道保留哪一条"的依据。
   feeds:
-    - https://www.qbitai.com/feed
-    - https://www.infoq.cn/feed
+    - url: https://www.qbitai.com/feed
+      weight: 1.2
+      topics: [AI]
+    - url: https://www.infoq.cn/feed
+      weight: 1.1
+      topics: [开发]
+    - url: https://venturebeat.com/feed/
+      weight: 1.0
+      topics: [AI]
     - https://www.ifanr.com/feed
     - https://www.solidot.org/index.rss
     - https://techcrunch.com/feed/
-    - https://hnrss.org/frontpage
-  feed_concurrency: 4 # 同时拉取的源数量
+    - https://semiengineering.com/feed/
+    - https://www.eetimes.com/feed/
+  feed_concurrency: 4 # 同时拉取的源数量（实测 6 会让多个源同时失败）

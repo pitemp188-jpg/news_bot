@@ -12,14 +12,15 @@ from typing import Any
 
 import pytest
 from sqlalchemy import select
+from tests.fakes.llm import FakeLLM, reply
 
 from newsbot.agent.runner import Findings
 from newsbot.core.db import Database
 from newsbot.core.errors import RetriableError
-from newsbot.core.models import Report, Task
+from newsbot.core.models import LlmUsage, Report, Task
 from newsbot.dispatcher.pipeline import Pipeline
 from newsbot.dispatcher.session import SessionStore
-from newsbot.result.dedup import Deduper, Item
+from newsbot.result.dedup import Deduper, Item, StoryGrouper
 from newsbot.result.report import ReportBuilder
 
 
@@ -150,6 +151,63 @@ async def test_dedup_keeps_source_labels_aligned(tmp_path: Path) -> None:
         assert content.startswith("（注：")
         assert "S9" in content.split("\n\n")[0]
         assert "已合并" in content
+    finally:
+        await db.dispose()
+
+
+async def test_semantic_grouping_merges_rewrites_across_languages(tmp_path: Path) -> None:
+    """中文改写对英文原稿：词法判据抓不到，靠模型的分组合并。"""
+    db = await _make_db(tmp_path)
+    try:
+        findings = Findings(
+            answer="结论 [S1] [S2] [S3]",
+            sources=[
+                {
+                    "title": "Musk 与 Ambani 就 Starlink 印度牌照公开互怼",
+                    "url": "https://cn.example/1",
+                    "snippet": "两人在社交平台上互相指责，焦点是落地许可与频谱分配。",
+                    "label": "S1",
+                },
+                {
+                    "title": "Elon Musk intensifies attack on Ambani over Starlink India licence",
+                    "url": "https://en.example/2",
+                    "snippet": "The two traded barbs over the licence and spectrum allocation.",
+                    "label": "S2",
+                },
+                {
+                    "title": "英伟达发布新一代推理芯片",
+                    "url": "https://news.example/3",
+                    "snippet": "面向数据中心的推理加速卡。",
+                    "label": "S3",
+                },
+                {"title": "某车企公布三季度交付量", "url": "https://news.example/4", "label": "S4"},
+            ],
+        )
+        llm = FakeLLM(replies=[reply("1,2", tokens=9)])
+
+        async def fixed() -> Deduper:
+            return Deduper(grouper=StoryGrouper(llm, min_items=4))
+
+        pipeline = Pipeline(
+            db,
+            runner=FakeRunner(findings=findings),
+            reporter=ReportBuilder(),
+            sender=FakeSender(),
+            sessions=SessionStore(db),
+            deduper=fixed,
+        )
+        async with db.session() as session:
+            task = await session.get(Task, await _make_task(db))
+            assert task is not None
+            await pipeline.execute(session, task)
+
+        assert [item["label"] for item in findings.sources] == ["S1", "S3", "S4"]
+        assert "已合并" in findings.answer
+
+        # 语义分组也是一次模型调用，用量必须落库，否则后台成本统计会漏
+        async with db.session() as session:
+            usages = list((await session.execute(select(LlmUsage))).scalars())
+        assert [usage.prompt_tokens for usage in usages] == [9]
     finally:
         await db.dispose()
 

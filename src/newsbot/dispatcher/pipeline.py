@@ -80,8 +80,9 @@ class Pipeline:
         """执行任务；投递失败按可重试处理，其余错误向上抛给队列分类。"""
         history = await self._history(task)
         findings = await self._runner.run(task.query, history)
-        await self._record_usage(session, task, findings)
+        # 去重放在用量落库之前：语义分组会产生一次模型调用，它的用量也要进 llm_usage
         await self._drop_duplicates(findings)
+        await self._record_usage(session, task, findings)
         built = await self._reporter.build(task, findings)
         content = built.content
 
@@ -154,7 +155,12 @@ class Pipeline:
             )
             for item in sources
         ]
-        kept_indexes = deduper.keep_indexes(items)
+        # keep() 会先做一次可选的语义分组（模型判断"这几条是不是同一件事"），
+        # 再按内容判据决定保留哪些；分组用量的写入紧跟其后
+        kept_indexes = await deduper.keep(items)
+        for usage in deduper.usages:
+            findings.usages = [*(getattr(findings, "usages", None) or []), usage]
+        deduper.usages.clear()
         if len(kept_indexes) == len(items):
             return
         dropped = [source for index, source in enumerate(sources) if index not in kept_indexes]

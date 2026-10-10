@@ -58,9 +58,18 @@ class QueueSection(BaseModel):
 
 
 class ScheduleSection(BaseModel):
+    """定时推送与去重配置。去重配置放在这里是因为定时推送正是去重的主要场景。"""
+
     default_time: str = "21:00"
     default_topics: list[str] = Field(default_factory=lambda: ["AI"])
     dedup_days: int = 7
+    # 语义去重：让模型判断"这几条是不是同一件事"，补上词法判据在中文改写、
+    # 无版本号的纯中文事件上的盲区。模型只做分组，保留哪一条仍由确定性规则决定；
+    # 关掉就只用词法判据（零模型成本）
+    dedup_with_llm: bool = True
+    # 语义分组的超时。默认 90s：当前模型是推理模型，一次分组实测 12～40s，而模型
+    # 客户端自身还会重试 3 次（间隔 2/4/8s），设得太小会在网络抖动时白白放弃分组
+    dedup_llm_timeout_seconds: float = 90.0
 
 
 class AgentSection(BaseModel):
