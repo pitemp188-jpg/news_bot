@@ -61,6 +61,13 @@ def setup_logging(*, level: str = "INFO", log_dir: Path | None = None) -> None:
     root = logging.getLogger()
     root.setLevel(level.upper())
 
+    # 先摘掉外来 handler。第三方依赖（实测 browser-use 的 logging_config）会往根
+    # 日志上挂自己的 handler，若不清掉就会出现同一条日志打印两遍、格式还不一致；
+    # 反过来，我们先装好 handler 之后，那边的 setup_logging 因为 hasHandlers() 为真
+    # 会直接返回，不会再清空根日志——这一点是长跑模式能留下日志文件的前提。
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     console.addFilter(_TraceFilter())

@@ -41,6 +41,11 @@ logger = get_logger(__name__)
 SCHEDULED_QUERY = "请汇总「{topic}」最近一天的要点，每条附来源链接，只保留新进展。"
 
 
+async def _noop() -> None:
+    """调度器还没建好时的占位回调。"""
+    return None
+
+
 @dataclass
 class Target:
     """投递目标。"""
@@ -109,7 +114,15 @@ class App:
         queue = self.queue = TaskQueue(db, config.queue, pipeline.execute)
         await queue.start()
 
-        self.commands = Commands(db, queue, config.schedule)
+        # 订阅变更后必须让调度器重新同步，否则新建的订阅要等重启才生效、
+        # 退订的作业还会继续触发。回调用 lambda 延迟取 scheduler：
+        # 它在这行之后才创建
+        self.commands = Commands(
+            db,
+            queue,
+            config.schedule,
+            on_schedule_change=lambda: self.scheduler.sync() if self.scheduler else _noop(),
+        )
         router.set_inbound(self._on_message)
 
         scheduler = self.scheduler = Scheduler(db, timezone=config.app.timezone, submit=self._submit_schedule)
@@ -305,8 +318,15 @@ def build_app(config: Config, **kwargs: Any) -> App:
 async def run_service() -> int:
     """CLI 入口：加载配置、组装并常驻运行。"""
     from newsbot.core.config import get_config
+    from newsbot.core.log import setup_logging
 
     config = get_config()
+    # 必须在组装 App 之前配置日志，而且不能省。Agent 首次用到浏览器时会构造
+    # browser-use 的 BrowserSession，那一侧的 setup_logging 发现根日志"已有 handler"
+    # 会原样保留，否则就会把根 handler 清空、换成它自己的格式。原来这里没调用：
+    # 于是长跑模式（run）既没有 data/logs/newsbot.log 落盘，也没有凭证脱敏，
+    # 日志格式全被第三方接管——挂机一整天出问题时无从排查。
+    setup_logging(level=config.app.log_level, log_dir=config.log_dir)
     config.ensure_ready()
     app = App(config)
     try:
