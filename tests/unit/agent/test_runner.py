@@ -273,3 +273,46 @@ async def test_budget_summary_uses_stable_labels() -> None:
     assert findings.budget_exhausted
     assert "[S1]" in findings.answer and "[S3]" in findings.answer
     await runner.aclose()
+
+
+async def test_plan_is_logged_so_planning_is_observable(caplog: Any) -> None:
+    """模型每步的规划必须落进日志。
+
+    规划曾是唯一完全不可观测的环节：只要求模型写检索词，却不记录它为什么这样查，
+    于是只能在日志里冒出整句检索词时事后推断规划失败。
+    """
+    import logging
+
+    search = FakeSearchTool(hits=[{"title": "标题", "url": "https://a.example/1", "snippet": "摘要"}])
+    llm = FakeLLM(
+        replies=[
+            reply(
+                "我打算先查 AI 芯片的近期进展，因为用户问的是最新融资",
+                calls=[ToolCall(id="c1", name="search", arguments={"query": "AI 芯片"})],
+            ),
+            reply("结论"),
+        ]
+    )
+    runner = Runner(llm, [search], _settings())
+    with caplog.at_level(logging.INFO, logger="newsbot.agent.runner"):
+        findings = await runner.run("今天 AI 新闻")
+    assert "第 1 步规划" in caplog.text
+    assert "打算先查 AI 芯片的近期进展" in caplog.text
+    assert findings.answer == "结论"
+
+
+async def test_empty_plan_does_not_log_noise(caplog: Any) -> None:
+    """模型没写规划时不该记空规划——否则日志里全是无意义条目。"""
+    import logging
+
+    search = FakeSearchTool(hits=[{"title": "标题", "url": "https://a.example/1", "snippet": "摘要"}])
+    llm = FakeLLM(
+        replies=[
+            reply("", calls=[ToolCall(id="c1", name="search", arguments={"query": "AI"})]),
+            reply("结论"),
+        ]
+    )
+    runner = Runner(llm, [search], _settings())
+    with caplog.at_level(logging.INFO, logger="newsbot.agent.runner"):
+        await runner.run("q")
+    assert "步规划" not in caplog.text

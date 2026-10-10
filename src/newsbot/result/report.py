@@ -17,11 +17,17 @@ from newsbot.core.models import Task
 logger = get_logger(__name__)
 
 MAX_CHARS = 2000
+# 来源列表最多列这么多条：正文引用通常只有几条，列 20+ 条既没人看、
+# 还会把 max_chars 占满把正文挤掉（实测 22 条来源导致正文被截成一句"已截断"）
+MAX_LISTED = 12
+# 截断时正文至少保留这么多字符，来源列表再长也不能把结论挤没
+MIN_ANSWER_CHARS = 600
 PLAIN_PLATFORMS = {"weixin"}
 
 _INLINE_MARKS = re.compile(r"[*_`]+")
 _HEADING = re.compile(r"^#{1,6}\s*", re.MULTILINE)
 _LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_CITATION = re.compile(r"\[S(\d+)\]")
 
 
 @dataclass
@@ -30,6 +36,26 @@ class BuiltReport:
 
     content: str
     sources: list[dict[str, str]] = field(default_factory=list)
+
+
+def cited_sources(text: str, sources: list[dict[str, str]]) -> list[dict[str, str]]:
+    """只保留正文实际引用到的来源。
+
+    读者要的是"这句话出自哪"，把检索过程中路过的 20 多条无关条目全列出来
+    既无助于核对，还会把版面占满。正文没引用任何编号时（模型偶尔会忘）
+    退回完整列表——宁可多列，也不能把来源全丢掉。
+    """
+    cited = {int(number) for number in _CITATION.findall(text)}
+    if not cited:
+        return sources
+    kept = [item for item in sources if _label_number(item) in cited]
+    return kept or sources
+
+
+def _label_number(item: dict[str, str]) -> int:
+    """从来源的 label（S3）解析出编号；解析不出来返回 0。"""
+    label = str(item.get("label", "") or "")
+    return int(label[1:]) if label.startswith("S") and label[1:].isdigit() else 0
 
 
 def to_plain(text: str) -> str:
@@ -51,14 +77,18 @@ def add_source_list(text: str, sources: list[dict[str, str]]) -> str:
 
     过去这里自己从 1 重新编号并截断到 10 条，导致正文的 [1] 与列表第 1 条
     根本不是同一篇（实测日报正文写"出自爱范儿早报"，列表第 1 条却是 InfoQ
-    的另一篇），被引用的来源还可能因截断直接消失。现在编号存在来源里、不截断。
+    的另一篇），被引用的来源还可能因截断直接消失。现在编号存在来源里，
+    并且由 cited_sources 保证"列出来的都是正文真正用到的"。
     """
     if not sources:
         return text
+    listed = sources[:MAX_LISTED]
     lines = []
-    for index, item in enumerate(sources, 1):
+    for index, item in enumerate(listed, 1):
         title = item.get("title") or item.get("url") or ""
         lines.append(f"{source_label(item, index)}. {title} {item.get('url', '')}".rstrip())
+    if len(sources) > len(listed):
+        lines.append(f"（另有 {len(sources) - len(listed)} 条来源未列出）")
     return f"{text}\n\n来源：\n" + "\n".join(lines)
 
 
@@ -74,13 +104,18 @@ class ReportBuilder:
         sources = [dict(item) for item in (getattr(findings, "sources", None) or [])]
         if not answer:
             answer = await self._summarize(task, sources)
-        content = add_source_list(answer, sources)
+        listed = cited_sources(answer, sources)
+        content = add_source_list(answer, listed)
         if len(content) > self._max_chars:
-            # 只能截正文，不能把来源列表截掉——否则被引用的来源会消失
-            sources_block = add_source_list("", sources)
-            room = max(0, self._max_chars - len(sources_block))
+            # 截断只能砍正文，且必须给正文留出下限：来源列表再长也不能把结论挤没
+            # （实测 22 条来源把 max_chars 占满，正文只剩一句"内容过长已截断"）
+            sources_block = add_source_list("", listed)
+            room = max(MIN_ANSWER_CHARS, self._max_chars - len(sources_block))
             answer = answer[:room] + "\n…（内容过长已截断）"
-            content = add_source_list(answer, sources)
+            content = add_source_list(answer, listed)
+        if len(listed) < len(sources):
+            # 交出去的是全部来源（落库、去重都要用），只是不在正文里全列
+            content += f"\n\n（另有 {len(sources) - len(listed)} 条检索中经过的来源与结论无关，未列出。）"
         return BuiltReport(content=content, sources=sources)
 
     async def _summarize(self, task: Task, sources: list[dict[str, str]]) -> str:
