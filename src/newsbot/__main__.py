@@ -91,8 +91,6 @@ def _doctor() -> int:
     print("\n[模型]")
     print(f"  base_url: {config.secrets.llm_base_url}")
     print(f"  model:    {config.secrets.llm_model}")
-    browser_model = config.secrets.llm_model_browser or config.secrets.llm_model
-    print(f"  browser:  {browser_model}（浏览器子 Agent，可用 LLM_MODEL_BROWSER 单独指定）")
     print(f"  api_key:  {'已配置' if config.secrets.llm_api_key else '缺失（必填）'}")
 
     print("\n[搜索]")

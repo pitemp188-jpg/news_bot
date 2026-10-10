@@ -54,15 +54,6 @@ def test_add_source_list_falls_back_to_position() -> None:
     assert "S1. 标题 https://a.example/1" in text
 
 
-def test_add_source_list_keeps_all_sources() -> None:
-    # 过去截断到 10 条，会把正文引用的来源直接删掉
-    sources = [{"title": f"标题{i}", "url": f"https://a.example/{i}", "label": f"S{i}"} for i in range(1, 16)]
-    text = add_source_list("结论", sources)
-    for index in range(1, 16):
-        assert f"S{index}. 标题{index}" in text
-    assert text.count("\n") >= 15
-
-
 def test_to_plain_strips_markdown() -> None:
     plain = to_plain("# 标题\n\n**要点**：`代码`\n\n[链接](https://a.example)")
     assert "#" not in plain
@@ -91,17 +82,32 @@ async def test_build_truncates_long_content() -> None:
     findings = Findings(answer="长" * 5000, sources=[])
     built = await ReportBuilder(max_chars=200).build(_task(), findings)
     assert "内容过长已截断" in built.content
-    assert len(built.content) < 300
+    # 正文至少要留 MIN_ANSWER_CHARS，不能因为 max_chars 设得小而把结论砍光
+    assert len(built.content) < 900
+    assert built.content.index("…（内容过长已截断）") >= 600
 
 
-async def test_truncation_never_drops_sources() -> None:
-    # 截断只能砍正文：来源列表被砍掉会让正文引用直接指向空气
-    sources = [{"title": f"标题{i}", "url": f"https://a.example/{i}", "label": f"S{i}"} for i in range(1, 8)]
-    findings = Findings(answer="长" * 5000, sources=sources)
-    built = await ReportBuilder(max_chars=400).build(_task(), findings)
-    assert "内容过长已截断" in built.content
-    for index in range(1, 8):
-        assert f"S{index}. 标题{index} https://a.example/{index}" in built.content
+async def test_build_lists_only_cited_sources() -> None:
+    # 读者要的是"这句话出自哪"；把检索路过的无关条目全列出来既无助于核对又占版面
+    sources = [
+        {"title": "被引用的", "url": "https://a.example/1", "label": "S1"},
+        {"title": "路过的", "url": "https://a.example/2", "label": "S2"},
+    ]
+    findings = Findings(answer="结论 [S1]", sources=sources)
+    built = await ReportBuilder().build(_task(), findings)
+    assert "S1. 被引用的" in built.content
+    assert "S2. 路过的" not in built.content
+    assert "另有 1 条" in built.content
+    # 落库的是全部来源：去重要用、资讯库要用
+    assert built.sources == sources
+
+
+async def test_build_keeps_all_sources_when_answer_cites_nothing() -> None:
+    # 模型偶尔会忘了写编号，此时宁可多列也不能把来源全丢掉
+    sources = [{"title": "标题", "url": "https://a.example/1", "label": "S1"}]
+    findings = Findings(answer="没有编号的结论", sources=sources)
+    built = await ReportBuilder().build(_task(), findings)
+    assert "S1. 标题" in built.content
 
 
 async def test_empty_answer_without_llm_uses_placeholder() -> None:
@@ -135,3 +141,12 @@ async def test_summarizer_failure_falls_back_to_placeholder() -> None:
     findings = Findings(answer="", sources=[{"title": "标题", "url": "https://a.example/1"}])
     built = await ReportBuilder(BoomLLM()).build(_task(), findings)
     assert "未生成结论" in built.content
+
+
+def test_add_source_list_caps_listing_and_says_how_many_dropped() -> None:
+    # 列出 20+ 条来源没人看，还会把正文挤掉（实测 22 条来源导致正文只剩"已截断"）
+    sources = [{"title": f"标题{i}", "url": f"https://a.example/{i}", "label": f"S{i}"} for i in range(1, 16)]
+    text = add_source_list("结论", sources)
+    assert "S1. 标题1" in text and "S12. 标题12" in text
+    assert "S13. 标题13" not in text
+    assert "另有 3 条来源未列出" in text

@@ -16,9 +16,39 @@ def test_system_prompt_states_untrusted_web() -> None:
 
 def test_system_prompt_forbids_inventing_urls() -> None:
     # 实测模型会凭空抓取记忆中的网站（如 theverge），必须显式禁止
-    assert "禁止凭印象拼凑或猜测网址" in SYSTEM_PROMPT
-    assert "只能使用 search 或 news_db 返回过的网址" in SYSTEM_PROMPT
-    assert "不要凭空补充" in SYSTEM_PROMPT
+    assert "禁止凭印象拼凑或推测网址" in SYSTEM_PROMPT
+    assert "只能引用工具返回过的网址" in SYSTEM_PROMPT
+    assert "不要编造" in SYSTEM_PROMPT
+
+
+# ── harness 化：提示词只给目标与底线，流程由模型自己决定 ──
+# 曾经把 1/2/3/4 步骤和"搜索最多 2～3 次"写进提示词，等于用模板替模型做规划，
+# 结果是模型失去自主性、也失去"检索词没写好"这个反馈回路的学习机会。
+
+
+def test_system_prompt_does_not_prescribe_a_procedure() -> None:
+    # 旧版把 1/2/3/4 步骤与"搜索最多 2～3 次"写进提示词，等于用模板替模型做规划
+    assert "工作方式" not in SYSTEM_PROMPT, "不该再有步骤清单"
+    assert "搜索最多" not in SYSTEM_PROMPT
+    assert "通常只抓" not in SYSTEM_PROMPT
+    assert "由你根据当前掌握的信息判断" in SYSTEM_PROMPT, "策略归属要明确交给模型"
+
+
+def test_system_prompt_asks_model_to_state_its_plan() -> None:
+    # 规划必须可观测，否则只能在日志里事后推断规划失败（实测踩过）
+    assert "想清楚" in SYSTEM_PROMPT
+    assert "打算查什么" in SYSTEM_PROMPT
+
+
+def test_system_prompt_makes_search_feedback_actionable() -> None:
+    # 工具会如实反馈哪些检索词没命中，提示词要告诉模型那是让它改写检索词
+    assert "检索词由你负责提炼" in SYSTEM_PROMPT
+    assert "没有命中" in SYSTEM_PROMPT
+
+
+def test_system_prompt_leaves_budget_judgement_to_model() -> None:
+    assert "硬上限" in SYSTEM_PROMPT
+    assert "收手" in SYSTEM_PROMPT
 
 
 def test_messages_start_with_system_and_end_with_query() -> None:

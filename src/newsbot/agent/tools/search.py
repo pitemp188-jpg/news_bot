@@ -71,72 +71,10 @@ SNIPPET_OUTPUT_CHARS = 140
 _PROMO = re.compile(r"#?\s*欢迎关注.{0,60}?(?:微信公众号|公众号|微信号)[^\n]*", re.S)
 _BOILERPLATE = re.compile(r"^(?:点击)?(?:查看|阅读)?(?:原文|详情|全文)[>》]?$")
 
-# 检索词切分：标点一律当分隔符，因为中文没有词边界
-_KEYWORD_SPLIT = re.compile(r"[，。！？、；：（）「」【】《》,\.!\?;:()\[\]\"'“”‘’]+")
-# 功能词：它们不携带检索信息，却会让"多词同时命中"这条判据永远失败。
-# 实测整句问话被当成关键词时，输出里会出现「订阅源里没有同时包含『新闻、
-# 今天、重要』的条目」——用户读到会以为什么都没搜到。
-STOPWORDS = frozenset(
-    {
-        "今天",
-        "今日",
-        "昨天",
-        "明天",
-        "最近",
-        "最新",
-        "目前",
-        "现在",
-        "重要",
-        "有哪些",
-        "哪些",
-        "什么",
-        "怎么",
-        "如何",
-        "多少",
-        "是否",
-        "请",
-        "帮我",
-        "给出",
-        "汇总",
-        "总结",
-        "整理",
-        "梳理",
-        "列出",
-        "要点",
-        "摘要",
-        "来源",
-        "链接",
-        "编号",
-        "引用",
-        "标注",
-        "说明",
-        "新闻",
-        "资讯",
-        "消息",
-        "报道",
-        "动态",
-        "相关",
-        "关于",
-        "一下",
-        "一些",
-        "一个",
-        "以及",
-        "同时",
-        "的",
-        "了",
-        "吗",
-        "呢",
-        "和",
-        "与",
-    }
-)
-# 只在词内部剥离多字功能词：单字功能词（的、和、与）会咬坏「目的地」「和平」
-# 这类真正的词，所以整片段等于它时才算功能词；片段首尾的单字功能词单独收尾处理
-_INNER_STOPWORDS = tuple(sorted((word for word in STOPWORDS if len(word) > 1), key=len, reverse=True))
-_EDGE_CHARS = "的了和与吗呢"
-# 长于这个长度的中文词按 3 字窗口切片段参与匹配：没有分词器时，「具身智能机器人
-# 产业」整串永远不可能出现在标题里，但其中「机器人」应当能命中
-LONG_WORD_CHARS = 4
+# 检索词切分：只按空白与标点切，不做任何"猜用户想查什么"的处理。
+# 提炼检索词是 Agent 规划阶段的职责；工具猜不了的（猜中了也解释不清为什么），
+# 一旦工具替模型猜，模型就收不到"检索词没写好"的反馈，规划能力永远长不出来。
+_TOKEN_SPLIT = re.compile(r"\s+|[，。！？、；：（）「」【】《》,.!?;:()\[\]\"'“”‘’]+")
 
 
 def _unwrap(url: str) -> str:
@@ -281,90 +219,52 @@ def _host(url: str) -> str:
     return match.group(1).removeprefix("www.") if match else url
 
 
-def _phrases(query: str) -> list[str]:
-    """剥掉功能词后剩下的内容词，用于判断"哪几个词没被命中"。
+def query_tokens(query: str) -> list[str]:
+    """把检索词按空白与标点切成 token。
 
-    整句问话直接当关键词会让"今天""重要""有哪些"参与匹配：多词同时命中的判据
-    必然失败，输出里还会出现「订阅源里没有同时包含『新闻、今天、重要』的条目」，
-    让人误以为一篇都没搜到。这里先按标点切、再在片段内部剥掉多字功能词，最后
-    丢掉纯数字与单字残渣。筛完什么都不剩时退回按标点切的原片段，保证不比以前差。
+    只做切分，不做任何"猜用户想查什么"的处理：不删功能词、不做同义改写、
+    不切窗口。提炼检索词是 Agent 规划阶段的职责；工具替模型猜会同时弄坏两件事
+    ——猜错了结果不可用，猜对了模型也学不到该怎么写检索词。
+    实测证据：曾被整句问话触发「订阅源里没有同时包含『新闻、今天、重要』的条目」，
+    正确做法是让模型看到这个反馈并改写检索词，而不是让工具偷偷把词删掉。
     """
-    cleaned = _KEYWORD_SPLIT.sub(" ", query)
-    parts = [part.strip() for part in cleaned.split() if part.strip()]
-    phrases: list[str] = []
-    for part in parts:
-        core = part
-        for word in _INNER_STOPWORDS:
-            core = core.replace(word, " ")
-        for chunk in core.split():
-            # 片段首尾的单字功能词（「的人工智能」）要去掉，但不碰「目的地」这类词：
-            # 只有长度大于 2 才允许裁剪，裁完至少还剩两个字
-            if len(chunk) > 2:
-                chunk = chunk.strip(_EDGE_CHARS)
-            if len(chunk) > 1 and chunk.lower() not in STOPWORDS:
-                phrases.append(chunk)
-    return phrases or [part for part in parts if len(part) > 1] or [query.strip()]
+    return [token.strip() for token in _TOKEN_SPLIT.split(query) if token.strip()]
 
 
-def _keywords(query: str) -> list[str]:
-    """打分用关键词：内容词再加上长词的 3 字窗口。
+def _hit(token: str, text: str) -> bool:
+    """判断一个 token 是否真的出现在文本里。
 
-    没有分词器时「具身智能机器人产业」这种整串不可能出现在任何标题里，切成窗口
-    后「机器人」「智能机」这类片段才有机会命中。窗口只用于打分排序，不用于判断
-    哪个词没命中——否则提示语会被一堆无意义片段淹没。
+    中文按子串判断（中文没有词边界）；ASCII 要求两侧不是字母数字，否则
+    「AI」会命中 said / email / chain / openai——英文源里几乎每篇都含 said、email，
+    等于把「AI」变成万能匹配。这是匹配正确性，不是意图猜测。
     """
-    words: list[str] = []
-    for phrase in _phrases(query):
-        words.append(phrase)
-        if len(phrase) > LONG_WORD_CHARS and phrase.isascii() is False:
-            words.extend(phrase[index : index + 3] for index in range(len(phrase) - 2))
-    return words
+    if token.isascii():
+        return re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", text) is not None
+    return token in text
 
 
-def _hit(word: str, text: str) -> bool:
-    """判断关键词是否真的出现在文本里。
-
-    中文按子串判断（没有词边界），ASCII 关键词必须要求两侧不是字母数字：否则
-    「AI」会命中 said、email、chain、openai 里的字母组合——TechCrunch 与 HN 这些
-    英文源里几乎每篇都含 said/email，等于把「AI」变成了万能匹配。
-    """
-    if word.isascii():
-        return re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
-    return word in text
-
-
-def _score(item: dict[str, str], query: str, keywords: list[str]) -> int:
-    """相关度打分：整串命中权重最高，命中关键词越多分越高。
-
-    只判断"是否命中任一词"会把「AI 芯片」退化成匹配「AI」，
-    实测会返回一堆只沾了 AI 的无关条目，所以必须按命中数排序。
-    """
+def _score(item: dict[str, str], tokens: list[str]) -> int:
+    """相关度：命中的 token 越多分越高；标题命中比摘要命中权重高。"""
     title = item["title"].lower()
     snippet = item["snippet"].lower()
-    phrase = query.strip().lower()
     score = 0
-    if phrase and _hit(phrase, title):
-        score += 4
-    elif phrase and _hit(phrase, snippet):
-        score += 2
-    for word in keywords:
-        if _hit(word, title):
+    for token in tokens:
+        if _hit(token, title):
             score += 2
-        elif _hit(word, snippet):
+        elif _hit(token, snippet):
             score += 1
     return score
 
 
 def match_feed_items(items: list[dict[str, str]], query: str, limit: int) -> tuple[list[dict[str, str]], str]:
-    """按相关度过滤、用发布时间作次级排序；返回（结果, 需要如实告知用户的提示）。
+    """按检索词过滤订阅源条目，并按发布时间次级排序；返回（结果, 反馈）。
 
-    提示很重要：这些源是"最新内容流"而不是搜索引擎索引，常常只命中部分关键词
-    （实测「AI 芯片」在没有芯片新闻时只能命中「AI」），不说明就会让用户误以为
-    结果全都是关于该话题的。
+    订阅源是"最新内容流"而不是搜索索引，常常只命中部分检索词。反馈必须如实说
+    清楚**哪些词没命中**，这是 Agent 决定"改写检索词还是收手"的唯一依据——
+    把没命中的词悄悄删掉，等于把反馈信号也删掉了。
     """
-    phrases = _phrases(query)
-    keywords = [word.lower() for word in _keywords(query) if word.strip()]
-    scored = [(item, _score(item, query, keywords)) for item in items]
+    tokens = [token.lower() for token in query_tokens(query)]
+    scored = [(item, _score(item, tokens)) for item in items]
     matched = [(item, score) for item, score in scored if score > 0]
     pool = matched or [(item, 0) for item in items]
     pool.sort(key=lambda pair: (pair[1], pair[0]["published"] or ""), reverse=True)
@@ -380,13 +280,11 @@ def match_feed_items(items: list[dict[str, str]], query: str, limit: int) -> tup
             break
 
     if not matched:
-        return unique, "订阅源里没有匹配该关键词的条目，以下是各源最新内容："
-    hit_words = {
-        word for word in phrases if any(_hit(word.lower(), (i["title"] + i["snippet"]).lower()) for i, _ in matched)
-    }
-    missing = [word for word in phrases if word not in hit_words]
-    if missing and len(phrases) > 1:
-        return unique, f"订阅源里没有同时包含「{'、'.join(missing)}」的条目，以下是只匹配到其余关键词的内容："
+        return unique, "没有条目包含这些检索词中的任何一个，以下是各源最新内容（请改写检索词）："
+    body = [(i["title"] + i["snippet"]).lower() for i, _ in matched]
+    missing = [token for token in tokens if not any(_hit(token, text) for text in body)]
+    if missing and len(tokens) > 1:
+        return unique, f"这些检索词没有任何条目同时包含：{'、'.join(missing)}。以下条目只命中了其余的词："
     return unique, ""
 
 
@@ -394,13 +292,16 @@ class SearchTool:
     """按配置选择搜索引擎，统一返回可读文本与来源。"""
 
     name = "search"
-    description = "搜索互联网，返回标题、链接和摘要。了解最新信息时先用它，再按需抓取正文。"
+    description = (
+        "检索互联网，返回标题、链接与摘要。传检索词（空格分隔的核心词效果最好）；"
+        "结果里会如实告诉你哪些词没有命中，据此决定是否改写检索词。"
+    )
     parameters: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "检索关键词，2～5 个词（例如「具身智能 融资」）；不要传整句问话，也不要用「今天/重要/有哪些」这类无检索价值的词",
+                "description": "检索词。工具按空白与标点切成词逐个匹配，整句问话里的虚词会匹配不到",
             },
             "time_range": {
                 "type": "string",

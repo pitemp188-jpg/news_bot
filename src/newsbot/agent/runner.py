@@ -98,6 +98,19 @@ class Findings:
         return [str(item.get("label", "")) for item in self.sources]
 
 
+def _budget_note(step: int, tokens: int, settings: AgentSection) -> str:
+    """每步附在工具结果后的预算提示。
+
+    这是 harness 化之后必须补上的一环：去掉"搜索最多 2～3 次"这类流程规定后，
+    模型会一直查到预算耗尽（实测 10 步烧完 60000 token，正文被截断）。正确做法
+    不是把次数规定加回来，而是把剩余预算如实告知，让模型自己决定何时收手。
+    """
+    tokens_left = max(0, settings.max_tokens - tokens)
+    steps_left = max(0, settings.max_steps - step)
+    warn = "预算所剩不多，请尽快基于已有信息给出结论。" if tokens_left < settings.max_tokens * 0.3 else ""
+    return f"[预算] 已用 {tokens}/{settings.max_tokens} token，剩余可用步数 {steps_left}。{warn}"
+
+
 def _assistant_message(content: str, calls: list[ToolCall]) -> dict[str, Any]:
     return {
         "role": "assistant",
@@ -142,16 +155,26 @@ class Runner:
                 )
 
             messages.append(_assistant_message(reply.content, reply.tool_calls))
-            for call in reply.tool_calls:
+            # 把模型这一步的规划记下来：它是"它打算查什么、为什么"的唯一可观测产物，
+            # 没有它就只能从日志里冒出整句检索词来事后推断规划失败（实测踩过）
+            if plan := (reply.content or "").strip():
+                logger.info("第 %d 步规划: %s", step, plan)
+            for index, call in enumerate(reply.tool_calls):
                 result = await self._invoke(call)
                 registry.register(result.sources)
+                content = registry.render(result.text)
+                # 预算提示附加在最后一条工具结果后，不额外插入消息：它属于"观察"
+                # 这一步。用"还剩多少"替代"最多搜几次"——实测去掉次数规定后模型会
+                # 一路查到预算耗尽（10 步 60000 token），这个反馈是必须的配套
+                if index == len(reply.tool_calls) - 1:
+                    content = f"{content}\n\n{_budget_note(step, tokens, self._settings)}"
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call.id,
                         "name": call.name,
                         # 换成全局编号后再给模型，引用才可能与末尾来源列表对应
-                        "content": registry.render(result.text),
+                        "content": content,
                     }
                 )
 

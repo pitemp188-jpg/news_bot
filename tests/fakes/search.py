@@ -39,25 +39,35 @@ class FakeSearchTool:
 
 @dataclass
 class FakeBrowserRunner:
-    """浏览器子 Agent 替身：返回固定文本或抛错，并记录并发峰值。"""
+    """浏览器驱动替身：按动作返回结果或抛错，并记录并发峰值。
 
-    text: str = "浏览器提取到的正文"
-    error: Exception | None = None
+    新接口是"下发动作"而不是"交给子 Agent 跑一个任务"，所以记录的是
+    (action, params)；state 动作需要单独给文本，因为工具会在交互后回读页面。
+    """
+
+    text: str = "动作已执行。"
+    state: str = "[1] 链接 标题"
+    error: str = ""
     active: int = 0
     peak: int = 0
-    calls: list[tuple[str, str]] = field(default_factory=list)
+    calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
-    async def run(self, url: str, task: str) -> str:
+    async def act(self, action: str, params: dict[str, Any]) -> Any:
         import asyncio
 
-        self.calls.append((url, task))
+        from newsbot.agent.tools.browser import ActionOutcome
+
+        self.calls.append((action, dict(params)))
         self.active += 1
         self.peak = max(self.peak, self.active)
         try:
-            await asyncio.sleep(0.05)
-            if self.error is not None:
-                raise self.error
-            return self.text
+            await asyncio.sleep(0.02)
+            # 真实驱动自己吞掉异常并翻译成可行动说明，替身照同样的契约返回
+            if self.error:
+                return ActionOutcome(error=self.error)
+            if action == "state":
+                return ActionOutcome(text=self.state)
+            return ActionOutcome(text=self.text)
         finally:
             self.active -= 1
 
