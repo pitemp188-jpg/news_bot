@@ -12,7 +12,7 @@ import binascii
 import email.utils
 import html as html_mod
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
@@ -155,7 +155,7 @@ def _tidy_url(url: str) -> str:
     return html_mod.unescape(_TRACKING_PARAMS.sub("", url)).rstrip("?&")
 
 
-def _zone(name: str) -> Any:
+def _zone(name: str) -> tzinfo:
     """按名字取时区；取不到就退回 UTC（宁可差时区，也不要让整次检索失败）。"""
     try:
         return ZoneInfo(name)

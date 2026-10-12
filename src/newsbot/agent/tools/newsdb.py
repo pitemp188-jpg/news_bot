@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
@@ -118,7 +118,7 @@ def _short_time(value: Any, timezone: str = DEFAULT_TIMEZONE) -> str:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
     try:
-        zone = ZoneInfo(timezone)
+        zone: tzinfo = ZoneInfo(timezone)
     except Exception:
         zone = UTC
     return f"{moment.astimezone(zone):%m-%d %H:%M}"
