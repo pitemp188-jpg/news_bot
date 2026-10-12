@@ -57,6 +57,7 @@ news_bot/
 │   │       └── newsdb.py
 │   ├── result/
 │   │   ├── dedup.py
+│   │   ├── hot.py               # 事件热度：48h 窗口 / 24h 半衰期 / 独立参与者
 │   │   └── report.py
 │   └── api/
 │       ├── server.py            # FastAPI 应用、登录、静态资源托管
