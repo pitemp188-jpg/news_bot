@@ -9,9 +9,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from newsbot.app import App, build_app, run_service
 from newsbot.core.config import get_config
+from newsbot.core.db import Database
 from newsbot.core.errors import NewsbotError
 from newsbot.core.log import setup_logging
 from newsbot.gateway.weixin import WeixinStore, qr_login
@@ -44,6 +46,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     backup = sub.add_parser("backup", help="生成数据库快照")
     backup.add_argument("--out", help="输出目录，默认 data/backups")
+
+    sub.add_parser("migrate", help="升级数据库结构（补建缺失的表与字段）")
     return parser
 
 
@@ -203,6 +207,25 @@ async def _backup(out: str | None) -> int:
     return 0
 
 
+async def _migrate() -> int:
+    """把库升级到当前代码需要的结构。
+
+    单独一个入口的意义：服务启动时会自动调 `prepare()`，但启动前的批量变更（例如给
+    大表补列）更适合在停服后手动跑一次并看日志，而不是夹在启动流程里。
+    """
+    config = get_config()
+    setup_logging(level=config.app.log_level, log_dir=config.log_dir)
+    db = Database(config.db_url)
+    try:
+        if not Path(config.db_url.removeprefix("sqlite+aiosqlite:///")).exists():
+            print(f"数据库不存在，将新建：{config.db_url}")
+        await db.prepare()
+    finally:
+        await db.dispose()
+    print("数据库结构已是最新。")
+    return 0
+
+
 async def _run() -> int:
     return await run_service()
 
@@ -219,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_search(args.query, args.provider, args.count))
     if args.command == "backup":
         return asyncio.run(_backup(args.out))
+    if args.command == "migrate":
+        return asyncio.run(_migrate())
     if args.command == "api":
         from newsbot.api.server import serve_api
 

@@ -86,7 +86,7 @@ class App:
         # 一句 unable to open database file，干净机器上首次部署必踩
         config.data_dir.mkdir(parents=True, exist_ok=True)
         db = self.db = Database(config.db_url)
-        await db.init()
+        await db.prepare()
 
         llm = self._llm or OpenAIClient(config.secrets)
         self._llm = llm

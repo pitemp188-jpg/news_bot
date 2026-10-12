@@ -240,3 +240,14 @@ api, gateway  →  dispatcher  →  agent, result  →  core
   实测教训：QQ 侧漏了这两条，机器人静默离线 33 小时而进程一直健康、日志里只有"重连失败"。
 - **进程守护**：`scripts/watchdog.ps1` 负责"进程是否活着"，服务掉了就拉起；`run` 模式自身负责"活着但离线"，靠无限重连自愈。两者分工，避免两处状态判断互相打架。
   注意强杀进程会留下孤儿浏览器进程占住 `data/browser/profile`，因此浏览器启动前会清残留（见 [08-porting.md](08-porting.md) 第 6.1 节）。
+
+## 12. 数据库结构变更
+
+两条路，按变更性质选：
+
+| 变更 | 走哪条 | 为什么 |
+| --- | --- | --- |
+| 加表、加可空列 / 有常量默认值的列 | `Database.prepare()`（启动自动执行，也可 `python -m newsbot migrate`） | 幂等、不用人工确认基线，`create_all` + `ALTER TABLE ADD COLUMN` 就够 |
+| 删列、改类型、加约束、数据回填 | `migrations/` 的 alembic 迁移 | SQLite 的 ADD COLUMN 做不了这些 |
+
+`prepare()` 必须两步都做：`create_all` **只建缺失的表**，已有表的列一个都不动。只调它的话，给模型加字段后老库会一直缺列，服务一启动就 `no such column`。
