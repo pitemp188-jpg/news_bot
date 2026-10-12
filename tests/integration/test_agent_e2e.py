@@ -73,4 +73,8 @@ async def test_system_prompt_is_sent_to_model() -> None:
         await runner.run("你好")
     finally:
         await runner.aclose()
-    assert llm.calls[0][0] == {"role": "system", "content": SYSTEM_PROMPT}
+    first = llm.calls[0][0]
+    assert first["role"] == "system"
+    # 系统提示词外面还包了一层"现在是几号"，所以只断言包含，不再断言完全相等。
+    assert SYSTEM_PROMPT in first["content"]
+    assert "现在是" in first["content"]
