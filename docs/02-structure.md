@@ -58,6 +58,7 @@ news_bot/
 │   ├── result/
 │   │   ├── dedup.py             # 词法 + 语义去重（同事件只留一条）
 │   │   ├── hot.py               # 事件热度：48h 窗口 / 24h 半衰期 / 独立参与者
+│   │   ├── cluster.py           # 事件聚簇：预筛配对 → 模型判定 → 复核 → 落 story/report_item
 │   │   ├── selection.py         # 精选：同一标准两轮打分 + 信源分级门槛
 │   │   └── report.py
 │   └── api/

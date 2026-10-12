@@ -196,7 +196,7 @@ sequenceDiagram
 | `task` | id, kind(scheduled/chat/manual), query, status, platform, chat_id, attempts, error, created_at, started_at, finished_at | 任务记录与状态 |
 | `schedule` | id, cron, topics(json), platform, chat_id, enabled | 定时推送配置，调度器据此同步 job |
 | `chat_session` | platform, chat_id, user_id, history(json), updated_at | 最近 N 轮对话，用于追问 |
-| `news_item` | id, url, url_hash, title, source, published_at, content_hash, simhash, fetched_at | 资讯库，去重依据 |
+| `news_item` | id, url, url_hash, title, source, published_at, summary, content_hash, simhash, fetched_at | 资讯库，去重依据；`summary` 是入库时的正文片段，给**聚簇**判定用（只凭标题判「是不是同一件事」会漏掉中译稿） |
 | `report` | id, task_id, content, sources(json), created_at | 生成的回复 / 日报 |
 | `delivery` | id, report_id, platform, chat_id, content, status(pending/sent/failed/waiting_user), attempts, error, sent_at | 投递记录；`content` 保存待发文本，使无报告的推送也能补投；`waiting_user` 等待用户下次发消息时补投 |
 | `llm_usage` | id, task_id, model, prompt_tokens, completion_tokens, created_at | 成本统计 |

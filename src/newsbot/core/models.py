@@ -77,6 +77,9 @@ class NewsItem(Base):
     title: Mapped[str] = mapped_column(Text, default="")
     source: Mapped[str] = mapped_column(String(128), default="")
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    # 摘要/正文片段。入库时就在手里（去重要用它），存下来是给**聚簇**用的：只凭标题
+    # 判断"是不是同一件事"会漏掉中英文互译的同一件事，而标题里往往只有一方措辞
+    summary: Mapped[str] = mapped_column(Text, default="")
     content_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
     simhash: Mapped[str] = mapped_column(String(32), default="", index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
