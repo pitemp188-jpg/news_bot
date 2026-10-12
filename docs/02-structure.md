@@ -56,7 +56,11 @@ news_bot/
 │   │       ├── browser.py
 │   │       └── newsdb.py
 │   ├── result/
-│   │   ├── dedup.py
+│   │   ├── dedup.py             # 词法 + 语义去重（同事件只留一条）
+│   │   ├── hot.py               # 事件热度：48h 窗口 / 24h 半衰期 / 独立参与者
+│   │   ├── cluster.py           # 事件聚簇：预筛配对 → 模型判定 → 复核 → 落 story/report_item
+│   │   ├── digest.py            # 日报/周报/月报编排：一个事件一条，纯规则组装不调模型
+│   │   ├── selection.py         # 精选：同一标准两轮打分 + 信源分级门槛
 │   │   └── report.py
 │   └── api/
 │       ├── server.py            # FastAPI 应用、登录、静态资源托管
@@ -67,6 +71,7 @@ news_bot/
 │           ├── tasks.py
 │           ├── schedules.py
 │           ├── news.py
+│           ├── events.py          # 事件列表 / 事件详情 / 热度榜 / 日报编排
 │           └── system.py
 ├── web/                         # 管理界面
 │   ├── package.json / vite.config.ts / tsconfig.json / eslint.config.js
@@ -74,6 +79,8 @@ news_bot/
 │       ├── main.ts / App.vue / router.ts / styles.css
 │       ├── api/                 # 唯一允许发 HTTP 请求的目录（client.ts、format.ts）
 │       ├── views/               # 页面，一页一个文件
+│       │                        # 事件层：DigestView（当日精选）/ HotView（热度榜）/
+│       │                        #         EventsView（事件列表）/ EventDetailView（事件详情）
 │       └── components/          # 复用组件
 ├── tests/
 │   ├── conftest.py

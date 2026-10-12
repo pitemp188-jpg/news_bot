@@ -54,6 +54,85 @@ export interface NewsItem {
   fetched_at: string | null
 }
 
+/** 一个事件（一件事）。热度与参与者为空表示它还没到进榜门槛。 */
+export interface Story {
+  id: number
+  title: string
+  digest: string
+  first_seen_at: string | null
+  last_seen_at: string | null
+  locked: boolean
+  heat: number | null
+  participants: number | null
+}
+
+/** 事件页里的一条报道。role 决定它对"这件事到哪一步了"的含义。 */
+export interface StoryReport {
+  news_item_id: number
+  title: string
+  url: string
+  source: string
+  published_at: string | null
+  participant: string
+  tier: string
+  role: string
+  editorial: boolean
+  observed_at: string | null
+  score: number | null
+  selected: boolean | null
+}
+
+export interface StoryDetail {
+  story: Story
+  reports: StoryReport[]
+}
+
+export interface HotItem {
+  story_id: number
+  title: string
+  heat: number
+  index: number
+  participants: number
+  sources: number
+  trend: string
+  trend_pct: number | null
+  badges: string[]
+  latest_at: string | null
+  first_at: string | null
+}
+
+export interface HotBoard {
+  updated_at: string
+  window_hours: number
+  half_life_hours: number
+  rule: string
+  items: HotItem[]
+}
+
+export interface DigestItem {
+  story_id: number
+  title: string
+  digest: string
+  url: string
+  score: number
+  participants: number
+  official: boolean
+  follow_up_only: boolean
+  heat: number
+  importance: number
+  latest_at: string | null
+  also_reported: string[]
+}
+
+export interface Digest {
+  period: string
+  title: string
+  since: string
+  until: string
+  skipped: Record<string, number>
+  items: DigestItem[]
+}
+
 export interface SystemStatus {
   platforms: Record<string, boolean>
   queue: { depth: number; running: number }
@@ -170,6 +249,20 @@ export const api = {
     return request<Page<NewsItem>>('GET', `/api/news?${search}`)
   },
   reports: (limit = 20) => request<Page<Report>>('GET', `/api/reports?limit=${limit}`),
+
+  // ── 事件层 ──
+  // 编排与热度都由后端规则算出，前端只渲染，不在浏览器里复算一遍
+  digest: (period = 'daily', limit = 12) =>
+    request<Digest>('GET', `/api/digest?period=${period}&limit=${limit}`),
+  hot: (limit = 20) => request<HotBoard>('GET', `/api/hot?limit=${limit}`),
+  events: (params: { days?: number; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    search.set('days', String(params.days ?? 7))
+    search.set('limit', String(params.limit ?? 50))
+    return request<Page<Story>>('GET', `/api/events?${search}`)
+  },
+  event: (id: number) => request<StoryDetail>('GET', `/api/events/${id}`),
+
   deliveries: (status?: string) => {
     const search = new URLSearchParams()
     if (status) search.set('status', status)

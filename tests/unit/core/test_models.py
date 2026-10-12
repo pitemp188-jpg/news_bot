@@ -8,7 +8,20 @@ from __future__ import annotations
 
 from newsbot.core.models import Base, ChatSession, Delivery, LlmUsage, NewsItem, Report, Schedule, Task
 
-EXPECTED_TABLES = {"task", "schedule", "chat_session", "news_item", "report", "delivery", "llm_usage"}
+EXPECTED_TABLES = {
+    "task",
+    "schedule",
+    "chat_session",
+    "news_item",
+    "report",
+    "delivery",
+    "llm_usage",
+    # 事件层：热度与日报编排都要求“同一件事只算一次”，按文章算会被一家媒体的十篇刷满
+    "story",
+    "report_item",
+    "story_score",
+    "hot_snapshot",
+}
 
 
 def test_tables_registered() -> None:

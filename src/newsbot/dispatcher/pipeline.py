@@ -254,6 +254,9 @@ class Pipeline:
                             url_hash=digest,
                             title=str(item.get("title", "")),
                             source=str(item.get("source", "")),
+                            # 摘要存下来是给聚簇用的（只凭标题判"是不是同一件事"会漏掉
+                            # 中英文互译的同一件事）。它与去重判据同源，改动要一起改
+                            summary=str(item.get("snippet", "") or ""),
                             # 发布时间必须存：它是判断"这条新不新"的依据。此前一直留空，
                             # 于是模型看不到任何日期，把几天前的旧稿当成"最新进展"；
                             # news_db 也只能拿抓取时间当新鲜度，旧闻重抓就被算成新的。

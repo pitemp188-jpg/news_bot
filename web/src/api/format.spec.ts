@@ -4,7 +4,23 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { cronText, formatNumber, hostOf, kindText, platformName, relativeTime, statusText, statusTone } from './format'
+import {
+  badgeText,
+  cronText,
+  formatNumber,
+  heatIndex,
+  hostOf,
+  kindText,
+  periodText,
+  platformName,
+  relativeTime,
+  roleText,
+  roleTone,
+  statusText,
+  statusTone,
+  tierText,
+  trendText,
+} from './format'
 
 describe('statusText / statusTone', () => {
   it('把任务与投递状态翻成中文并给出配色', () => {
@@ -76,5 +92,50 @@ describe('formatNumber', () => {
   it('加千分位', () => {
     expect(formatNumber(1234567)).toBe('1,234,567')
     expect(formatNumber(0)).toBe('0')
+  })
+})
+
+describe('事件层展示', () => {
+  it('报道角色三态各自有中文名与轻重不同的配色', () => {
+    expect(roleText('primary')).toBe('一手报道')
+    expect(roleText('follow_up')).toBe('后续进展')
+    expect(roleText('duplicate')).toBe('重复报道')
+    expect(roleText('unknown')).toBe('unknown')
+
+    expect(roleTone('primary')).toBe('ok')
+    expect(roleTone('follow_up')).toBe('info')
+    expect(roleTone('duplicate')).toBe('')
+  })
+
+  it('信源分级翻成中文，认不出来原样返回', () => {
+    expect(tierText('T1')).toBe('官方一手')
+    expect(tierText('T1_5')).toBe('官方账号')
+    expect(tierText('T2')).toBe('媒体')
+    expect(tierText('T9')).toBe('T9')
+  })
+
+  it('趋势与标记翻成中文', () => {
+    expect(trendText('up')).toBe('升温')
+    expect(trendText('down')).toBe('降温')
+    expect(trendText('flat')).toBe('持平')
+    expect(trendText('new')).toBe('新事件')
+    expect(trendText('weird')).toBe('—')
+
+    expect(badgeText('surge')).toBe('骤增')
+    expect(badgeText('rising')).toBe('上升')
+    expect(badgeText('new')).toBe('新出现')
+  })
+
+  it('热度刻度保留一位小数，缺值显示占位符', () => {
+    expect(heatIndex(0.5333333333333333)).toBe('0.5')
+    expect(heatIndex(12)).toBe('12.0')
+    expect(heatIndex(null)).toBe('—')
+    expect(heatIndex(undefined)).toBe('—')
+  })
+
+  it('周期翻成中文', () => {
+    expect(periodText('daily')).toBe('日报')
+    expect(periodText('weekly')).toBe('周报')
+    expect(periodText('monthly')).toBe('月报')
   })
 })

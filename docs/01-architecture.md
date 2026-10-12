@@ -63,7 +63,7 @@ flowchart TD
 | gateway | `src/newsbot/gateway/` | 平台适配器（微信 / QQ）、白名单鉴权、聊天指令、入站路由、出站投递 | `BaseAdapter`、`MessageEvent`、`router.send()` |
 | dispatcher | `src/newsbot/dispatcher/` | 任务队列与 worker、超时重试取消、会话上下文、定时调度、执行流水线 | `queue.submit()`、`queue.cancel()`、`scheduler.sync()` |
 | agent | `src/newsbot/agent/` | 规划循环 + 工具（search / fetch / browser / newsdb） | `runner.run(query, ctx) -> Findings` |
-| result | `src/newsbot/result/` | 内容去重、引用编号、摘要成稿、按平台格式化与分段 | `dedup.keep_indexes()`、`report.build()` |
+| result | `src/newsbot/result/` | 内容去重、事件聚簇、事件热度、精选打分、引用编号、摘要成稿、按平台格式化与分段 | `dedup.keep_indexes()`、`hot.ranking()`、`selection.select()`、`report.build()` |
 | api | `src/newsbot/api/` | 管理后台 REST、登录鉴权、托管前端静态资源 | `/api/*` |
 | web | `web/` | 管理界面：仪表盘、任务、定时任务、资讯库、推送记录、设置 | — |
 
@@ -107,6 +107,44 @@ flowchart TD
 `dispatcher/pipeline.py`：`agent.runner.run()` → 内容去重（合并同一件事、剔除近期已推送）→ 落库用量 → `result.report.build()` → 落库 `report` 与新来源（写 `news_item`）→ `Sender.send()`。
 `Sender` 由 `app.py` 启动时注入（实际实现为 `gateway.router.send`），dispatcher 不直接 import gateway。
 去重排在用量落库**之前**：语义分组也是一次模型调用，它的用量要一起进 `llm_usage`。
+
+### 4.4 事件层与精选
+
+去重解决的是"这一次检索里不要出现副本"，但热度、日报编排、事件页要回答的是另一个问题：
+**同一件事在最近一段时间里被多少家互相独立的来源报道过**。所以需要事件这一层——
+`story` 是一件事，`report_item` 是一篇文章对一件事的归属（带 `role`：一手 / 后续进展 / 重复报道）。
+
+热度按**独立参与者**计数（`result/hot.py`，48 小时窗口、24 小时半衰期）：
+一家媒体发十篇也只算一次（否则榜单会被单个媒体刷满），社区里每个作者各算一个（讨论确实是热度），
+但社区来源**不计入"独立来源数"**（无法核对内容是否属实）。进榜要求参与者 ≥2 且编辑类来源 ≥1——
+一条独家报道不是热点。规则版本号 `RULE_VERSION` 与常量绑定：热度是相对量，换了口径的旧榜单与新榜单不可比。
+
+精选按**两次独立打分**判定（`result/selection.py`）：同一份规格、同一个提示词，对每条候选各打两次，
+`score1 + score2 >= 2 × 门槛` 才入选。两次用的是**完全相同**的提示词——任何"请复核上一遍"式的措辞
+都会让第二遍变成对第一遍的确认，差距信号随之归零；所以第二遍不带第一遍的分数，也不告诉它这是第二遍。
+入选看**和**（互相印证），`|score1 - score2|` 看**差**（标准在这条上不稳定，需要人工复核；
+取平均会把这个信号掩盖掉）。门槛按信源分级（T1 官方一手 / T1_5 官方账号与准官方 / T2 媒体与个人）
+分层：分的不是可信度，而是"同一份标准下不同来源的入选代价"。
+
+未取得两次评分的条目**按未入选处理**，不用另一次的结果顶替——否则"两次独立打分"就是假的。
+失败方向选"漏掉一条"而不是"全塞进日报"：全选正是改造前那份满是副本的日报。
+
+### 4.5 日报编排
+
+`result/digest.py` 把事件组织成日报/周报/月报。三条规则：
+
+- **一个事件一条**：组内多家报道合并成一条，编号不并列。读者要的是进展，不是同一消息的多份副本。
+- **有新增才出后续**：本期没有新报道的事件不进本期（按 `last_seen_at` 而不是首次出现筛——
+  上周开始、今天有进展的事件属于今天）。本期**只有后续进展**、没有一手报道的事件扣分排在后面，
+  因为读者要先知道发生了什么。
+- **组装全部用规则，不调用模型**。入选、排序、每条写什么都能复算；调模型会让"为什么今天这条
+  排第一"变成不可解释的，也让同一批数据两次跑出两个排序。
+
+重要度：`score + 5*log2(1+participants) + (官方一手 ? 5 : 0) - (本期只有后续 ? 6 : 0)`。
+参与者数量取 log 是因为它的贡献**边际递减**——2 家报到比 1 家重要得多，20 家比 10 家只重要一点；
+线性加会让一个被全网点名的发布会永远压住一切。`score` 是精选分。
+
+命令行可以直接看结果：`python -m newsbot digest --period weekly`（不跑 Agent、不调模型）。
 
 ## 5. 场景时序
 
@@ -175,10 +213,14 @@ sequenceDiagram
 | `task` | id, kind(scheduled/chat/manual), query, status, platform, chat_id, attempts, error, created_at, started_at, finished_at | 任务记录与状态 |
 | `schedule` | id, cron, topics(json), platform, chat_id, enabled | 定时推送配置，调度器据此同步 job |
 | `chat_session` | platform, chat_id, user_id, history(json), updated_at | 最近 N 轮对话，用于追问 |
-| `news_item` | id, url, url_hash, title, source, published_at, content_hash, simhash, fetched_at | 资讯库，去重依据 |
+| `news_item` | id, url, url_hash, title, source, published_at, summary, content_hash, simhash, fetched_at | 资讯库，去重依据；`summary` 是入库时的正文片段，给**聚簇**判定用（只凭标题判「是不是同一件事」会漏掉中译稿） |
 | `report` | id, task_id, content, sources(json), created_at | 生成的回复 / 日报 |
 | `delivery` | id, report_id, platform, chat_id, content, status(pending/sent/failed/waiting_user), attempts, error, sent_at | 投递记录；`content` 保存待发文本，使无报告的推送也能补投；`waiting_user` 等待用户下次发消息时补投 |
 | `llm_usage` | id, task_id, model, prompt_tokens, completion_tokens, created_at | 成本统计 |
+| `story` | id, title, digest, first_seen_at, last_seen_at, locked | 事件：多家来源报道的**同一件事**。热度、日报编排、事件页都要求「同一件事只算一次」——按文章算，一家媒体发十篇就会把榜单刷满 |
+| `report_item` | story_id, news_item_id, participant, tier, role(primary/follow_up/duplicate), editorial, observed_at | 报道归属：一篇文章对一个事件。`role` 决定热度怎么算——`follow_up` 挂到已有事件并产生新热度，`duplicate` 只贡献独立来源计数 |
+| `story_score` | news_item_id, score1, score2, selected, reason, created_at | 精选评分：同一份标准独立打两次。**和**用于判入选，**差**是「标准在它身上不稳定」的信号（取平均会掩盖掉） |
+| `hot_snapshot` | story_id, hour, heat, participants, complete | 逐小时热度快照。只在该小时被**完整观测**时写；没观测全的小时**不写**而不是写 0——写 0 会画出假的下跌 |
 
 ## 7. 任务状态机
 
@@ -240,3 +282,14 @@ api, gateway  →  dispatcher  →  agent, result  →  core
   实测教训：QQ 侧漏了这两条，机器人静默离线 33 小时而进程一直健康、日志里只有"重连失败"。
 - **进程守护**：`scripts/watchdog.ps1` 负责"进程是否活着"，服务掉了就拉起；`run` 模式自身负责"活着但离线"，靠无限重连自愈。两者分工，避免两处状态判断互相打架。
   注意强杀进程会留下孤儿浏览器进程占住 `data/browser/profile`，因此浏览器启动前会清残留（见 [08-porting.md](08-porting.md) 第 6.1 节）。
+
+## 12. 数据库结构变更
+
+两条路，按变更性质选：
+
+| 变更 | 走哪条 | 为什么 |
+| --- | --- | --- |
+| 加表、加可空列 / 有常量默认值的列 | `Database.prepare()`（启动自动执行，也可 `python -m newsbot migrate`） | 幂等、不用人工确认基线，`create_all` + `ALTER TABLE ADD COLUMN` 就够 |
+| 删列、改类型、加约束、数据回填 | `migrations/` 的 alembic 迁移 | SQLite 的 ADD COLUMN 做不了这些 |
+
+`prepare()` 必须两步都做：`create_all` **只建缺失的表**，已有表的列一个都不动。只调它的话，给模型加字段后老库会一直缺列，服务一启动就 `no such column`。
