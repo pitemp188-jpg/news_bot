@@ -48,7 +48,7 @@ onMounted(load)
       <span class="rule-item">更新于 {{ formatTime(board.updated_at, true) }}</span>
     </div>
     <p class="hint">
-      一家媒体发十篇只算一次（否则榜单会被单个媒体刷满），社区里每个作者各算一个但**不计入独立来源数**。
+      一家媒体发十篇只算一次（否则榜单会被单个媒体刷满），社区里每个作者各算一个但<strong>不计入独立来源数</strong>。
       进榜要求参与者 ≥2 且编辑类来源 ≥1——一条独家报道不是热点。
     </p>
   </section>
