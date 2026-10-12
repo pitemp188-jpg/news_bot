@@ -56,8 +56,9 @@ news_bot/
 │   │       ├── browser.py
 │   │       └── newsdb.py
 │   ├── result/
-│   │   ├── dedup.py
+│   │   ├── dedup.py             # 词法 + 语义去重（同事件只留一条）
 │   │   ├── hot.py               # 事件热度：48h 窗口 / 24h 半衰期 / 独立参与者
+│   │   ├── selection.py         # 精选：同一标准两轮打分 + 信源分级门槛
 │   │   └── report.py
 │   └── api/
 │       ├── server.py            # FastAPI 应用、登录、静态资源托管

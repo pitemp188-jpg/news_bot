@@ -92,6 +92,29 @@ class DeliverySection(BaseModel):
     fallback_platform: str = "qqbot"
 
 
+class EditorialSection(BaseModel):
+    """精选（日报/事件页的入选判定）配置。
+
+    门槛按**信源分级**而不是一刀切：官方一手发布（T1）本身就值得进日报，媒体转载
+    （T2）得多条互相印证。分层的意义在于"同一份标准下，不同来源的入选代价不同"，
+    而不是给官方开后门——官方来源一样要过同一份打分标准，只是门槛更低。
+    """
+
+    # 分级 → 入选门槛（0～10 分）。级别越高（越远离一手）门槛越高
+    tier_thresholds: dict[str, int] = Field(default_factory=lambda: {"T1": 6, "T1_5": 7, "T2": 8})
+    # 官方一手来源域名（进 T1）；官方账号 / 准官方（进 T1_5）。留空表示全部按 T2
+    official_domains: list[str] = Field(default_factory=list)
+    quasi_official_domains: list[str] = Field(default_factory=list)
+    # 单次打分调用的超时。当前模型是推理模型，一次 0～10 分实测数秒到数十秒
+    score_timeout_seconds: float = 60.0
+    # 推理 token 与正文共用额度，给太小会出现"调用成功但正文为空"，需留足余量
+    score_max_tokens: int = 4000
+    # |score1 - score2| 达到这个值就标为"标准在它身上不稳定"，需人工复核
+    unstable_gap: int = 3
+    # 一次精选最多打分多少条：逐条两次调用 = 2 倍成本，条数必须有上限
+    max_candidates: int = 40
+
+
 class FeedSource(BaseModel):
     """一个订阅源：地址、质量权重与行业标签。
 
@@ -202,6 +225,7 @@ class Config(BaseModel):
     agent: AgentSection = Field(default_factory=AgentSection)
     search: SearchSection = Field(default_factory=SearchSection)
     delivery: DeliverySection = Field(default_factory=DeliverySection)
+    editorial: EditorialSection = Field(default_factory=EditorialSection)
     api: ApiSection = Field(default_factory=ApiSection)
     secrets: Secrets = Field(default_factory=Secrets)
     data_dir: Path = ROOT / "data"

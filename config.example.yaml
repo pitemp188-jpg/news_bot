@@ -31,6 +31,22 @@ delivery:
   max_attempts: 3
   fallback_platform: qqbot # 主通道失败时的备用通道
 
+editorial:
+  # 精选：同一份标准对每条候选用模型独立打两次分，两次之和达到 2 倍门槛才入选。
+  # 门槛按信源分级定（T1 一手发布 / T1_5 官方账号与准官方 / T2 媒体与个人）。
+  tier_thresholds:
+    T1: 6
+    T1_5: 7
+    T2: 8
+  # 官方一手域名（进 T1）与准官方域名（进 T1_5）。留空表示全部按 T2 处理。
+  # 只写你确实能核实的域名——把陌生来源当官方等于替读者背书
+  official_domains: []
+  quasi_official_domains: []
+  score_timeout_seconds: 60 # 单次打分的时限（推理模型，实测数秒到数十秒）
+  score_max_tokens: 4000 # 推理 token 与正文共用额度，给太小会"调用成功但正文为空"
+  unstable_gap: 3 # 两次分差达到这个值就标为需人工复核（差值本身是信号，不取平均掩盖）
+  max_candidates: 40 # 一次最多打分多少条（逐条两次 = 双倍成本，必须设上限）
+
 api:
   host: 127.0.0.1
   port: 8765
