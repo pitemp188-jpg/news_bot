@@ -14,6 +14,7 @@ import html as html_mod
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -57,6 +58,8 @@ MIN_SNIPPET_CHARS = 12
 # 输出给 Agent 的摘要上限：实测多轮搜索会把上下文撑爆 token 预算，
 # 摘要只是"要不要抓这篇"的判断依据，细节交给 fetch
 SNIPPET_OUTPUT_CHARS = 140
+# 展示日期用的默认时区；实际由调用方传入 config.app.timezone
+DEFAULT_TIMEZONE = "Asia/Shanghai"
 # 各源在 description 里夹带的推广尾巴（爱范儿等），保留它只会污染日报
 _PROMO = re.compile(r"#?\s*欢迎关注.{0,60}?(?:微信公众号|公众号|微信号)[^\n]*", re.S)
 _BOILERPLATE = re.compile(r"^(?:点击)?(?:查看|阅读)?(?:原文|详情|全文)[>》]?$")
@@ -150,6 +153,15 @@ def _atom_link(block: str) -> str:
 def _tidy_url(url: str) -> str:
     """去掉跟踪参数，避免引用里带一长串无意义后缀。"""
     return html_mod.unescape(_TRACKING_PARAMS.sub("", url)).rstrip("?&")
+
+
+def _zone(name: str) -> Any:
+    """按名字取时区；取不到就退回 UTC（宁可差时区，也不要让整次检索失败）。"""
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        logger.warning("时区 %s 无法解析，按 UTC 显示日期", name)
+        return UTC
 
 
 def _published(block: str) -> str:
@@ -262,12 +274,15 @@ def _score(item: dict[str, Any], tokens: list[str]) -> float:
     return score * float(item.get("weight", 1.0))
 
 
-def _short_time(published: str) -> str:
+def _short_time(published: str, timezone: str = DEFAULT_TIMEZONE) -> str:
     """把 ISO 时间压成「MM-DD HH:MM」给模型看；解析不了就诚实标注"日期未知"。
 
     为什么必须标出来：日期是模型判断新鲜度的唯一依据。缺了它，模型只能拿训练
     数据里的印象补——实测就出现过把几天前的旧稿当成"最新进展"。写"日期未知"
     至少让模型知道这一条无法判断新旧。
+
+    时区**必须显式传入**，不能用 `astimezone()`（宿主时区）：部署到 UTC 服务器上
+    会让用户看到的日期差 8 小时，跨日时甚至差一天。
     """
     if not published:
         return "日期未知"
@@ -277,7 +292,7 @@ def _short_time(published: str) -> str:
         return "日期未知"
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=UTC)
-    local = stamp.astimezone()
+    local = stamp.astimezone(_zone(timezone))
     return f"{local:%m-%d %H:%M}"
 
 
@@ -399,12 +414,14 @@ class SearchTool:
         client: httpx.AsyncClient | None = None,
         timeout: float = 20.0,
         feed_timeout: float | None = None,
+        timezone: str = DEFAULT_TIMEZONE,
     ) -> None:
         self._settings = settings
         self._secrets = secrets
         self._feeds = list(feeds) if feeds is not None else default_feeds()
         self._feed_concurrency = max(1, feed_concurrency)
         self._timeout = timeout
+        self._timezone = timezone
         # 单个源的最长等待：实测 hnrss 会挂 20～36 秒，而检索要等所有源返回，
         # 不给单源设上限就会让一次搜索白等半分钟。默认取总超时的 40%。
         self._feed_timeout = feed_timeout if feed_timeout is not None else min(timeout * 0.4, DEFAULT_FEED_TIMEOUT)
@@ -438,7 +455,7 @@ class SearchTool:
             origin = hit.get("source") or _host(hit["url"])
             # 日期必须给模型看到：它是判断"这条新不新"的唯一依据。放在标题行——
             # 网址行必须保持纯净，`SourceRegistry.render` 靠它改写编号
-            when = _short_time(str(hit.get("published") or ""))
+            when = _short_time(str(hit.get("published") or ""), self._timezone)
             parts = [f"{index}. {hit['title']}（{origin} · {when}）", f"   {hit['url']}"]
             if snippet.strip():
                 parts.append(f"   {snippet}")

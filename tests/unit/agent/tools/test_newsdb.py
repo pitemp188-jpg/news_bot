@@ -131,13 +131,17 @@ async def test_output_shows_date_and_origin(tmp_path: Path) -> None:
     item.source = "ifanr.com"
     db = await _make_db(tmp_path, [item])
     try:
-        tool = NewsDbTool(db, now=_now)
+        # 显式传时区：显示日期不能跟随宿主时区（CI 是 UTC、本机是 UTC+8）
+        tool = NewsDbTool(db, now=_now, timezone="Asia/Shanghai")
         result = await tool.run(keyword="AI")
         assert "ifanr.com" in result.text, "来源名要显示出来"
-        assert "10-08" in result.text, "发布日期要显示给模型"
+        assert "10-08 20:00" in result.text, "UTC 12:00 应显示为北京 20:00"
         assert "日期未知" not in result.text
         assert result.sources[0].published.startswith("2026-10-08"), "发布日期要随来源传下去"
         assert result.sources[0].source == "ifanr.com"
+
+        utc = NewsDbTool(db, now=_now, timezone="UTC")
+        assert "10-08 12:00" in (await utc.run(keyword="AI")).text, "换时区结果跟着变"
     finally:
         await db.dispose()
 
@@ -155,7 +159,7 @@ async def test_unknown_publish_date_is_not_faked_with_crawl_time(tmp_path: Path)
         async with db.session() as session:
             session.add(item)
             await session.commit()
-        tool = NewsDbTool(db, now=_now)
+        tool = NewsDbTool(db, now=_now, timezone="Asia/Shanghai")
         result = await tool.run(keyword="无日期")
         assert "日期未知" in result.text
         assert "抓取于" in result.text, "抓取时间可以给，但必须标明它只是抓取时间"

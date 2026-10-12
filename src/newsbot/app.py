@@ -252,9 +252,12 @@ class App:
                 config.secrets,
                 feeds=config.search.feeds,
                 feed_concurrency=config.search.feed_concurrency,
+                # 日期按配置时区显示，不跟随宿主时区：部署到 UTC 服务器上会让用户
+                # 看到的日期差 8 小时，跨日时甚至差一天
+                timezone=config.app.timezone,
             ),
             FetchTool(config.agent, allow_private=False),
-            NewsDbTool(db),
+            NewsDbTool(db, timezone=config.app.timezone),
         ]
         if browser is not None or self._browser_available():
             tools.append(BrowserTool(config.agent, data_dir=config.data_dir, runner=browser))

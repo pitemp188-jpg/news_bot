@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 
@@ -18,6 +19,8 @@ from newsbot.core.models import NewsItem
 
 MAX_ROWS = 10
 SNIPPET_CHARS = 200
+# 展示日期用的默认时区；实际由调用方传入 config.app.timezone
+DEFAULT_TIMEZONE = "Asia/Shanghai"
 
 
 class NewsDbTool:
@@ -37,9 +40,10 @@ class NewsDbTool:
         "required": [],
     }
 
-    def __init__(self, db: Database, *, now: Any = None) -> None:
+    def __init__(self, db: Database, *, now: Any = None, timezone: str = DEFAULT_TIMEZONE) -> None:
         self._db = db
         self._now = now or (lambda: datetime.now(UTC))
+        self._timezone = timezone
 
     async def run(self, keyword: str = "", days: int = 7, **_: Any) -> ToolResult:
         since = self._now() - timedelta(days=max(1, int(days or 7)))
@@ -69,9 +73,9 @@ class NewsDbTool:
             # 允许退回抓取时间（见上），是为了历史数据不被整批丢弃——判据与展示的
             # 职责不同，不能因为过滤宽松就把展示也放宽。
             if item.published_at is not None:
-                when = _short_time(item.published_at)
+                when = _short_time(item.published_at, self._timezone)
             else:
-                when = f"日期未知，抓取于 {_short_time(item.fetched_at)}"
+                when = f"日期未知，抓取于 {_short_time(item.fetched_at, self._timezone)}"
             lines.append(f"{index}. {title}（{origin} · {when}）\n   {item.url}")
         sources = [
             Source(
@@ -102,11 +106,19 @@ def _iso(value: Any) -> str:
     return ""
 
 
-def _short_time(value: Any) -> str:
-    """压成「MM-DD HH:MM」给模型看；没有时间就标注日期未知。"""
+def _short_time(value: Any, timezone: str = DEFAULT_TIMEZONE) -> str:
+    """压成「MM-DD HH:MM」给模型看；没有时间就标注日期未知。
+
+    时区显式传入而不是用宿主时区：部署到 UTC 服务器上会让用户看到的日期差 8 小时，
+    跨日时甚至差一天。
+    """
     moment = value if isinstance(value, datetime) else None
     if moment is None:
         return "日期未知"
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
-    return f"{moment.astimezone():%m-%d %H:%M}"
+    try:
+        zone = ZoneInfo(timezone)
+    except Exception:
+        zone = UTC
+    return f"{moment.astimezone(zone):%m-%d %H:%M}"

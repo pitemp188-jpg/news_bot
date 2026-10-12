@@ -559,10 +559,18 @@ async def test_search_output_lets_source_registry_rewrite_labels() -> None:
 # 旧稿当成"最新进展"）。下面把这几个环节都锁住。
 
 
-def test_short_time_formats_iso_to_local_minute() -> None:
-    assert _short_time("2026-10-09T06:59:11+00:00") == "10-09 14:59"
+def test_short_time_uses_the_given_timezone() -> None:
+    """时区必须显式传入，不能跟随宿主时区。
+
+    实测缺陷：原先用 `astimezone()`（宿主时区），本机 UTC+8 时碰巧对、CI 是 UTC 立刻炸；
+    更糟的是部署到 UTC 服务器上，用户看到的日期会差 8 小时，跨日时甚至差一天。
+    """
+    assert _short_time("2026-10-09T06:59:11+00:00", "Asia/Shanghai") == "10-09 14:59"
+    assert _short_time("2026-10-09T06:59:11+00:00", "UTC") == "10-09 06:59"
+    assert _short_time("2026-10-09T23:30:00+00:00", "Asia/Shanghai") == "10-10 07:30", "跨日也要对"
     assert _short_time("") == "日期未知"
     assert _short_time("不是时间") == "日期未知"
+    assert _short_time("2026-10-09T06:59:11+00:00", "Not/AZone") == "10-09 06:59", "时区名写错退回 UTC"
 
 
 def test_match_feed_items_drops_older_than_window_and_says_so() -> None:
