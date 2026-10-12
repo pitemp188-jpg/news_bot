@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import types
 from collections.abc import Iterator
@@ -289,6 +290,9 @@ def fake_browser_use(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     service.Tools = _FakeTools
     monkeypatch.setitem(sys.modules, "browser_use", module)
     monkeypatch.setitem(sys.modules, "browser_use.tools.service", service)
+    # 残留进程清理默认置空：单测绝不能去枚举、更别说杀本机真实进程
+    monkeypatch.setattr(browser_module, "_list_browser_processes", list)
+    monkeypatch.setattr(browser_module, "_terminate_process", lambda pid: None)
     yield
     _FakeTools.instances.clear()
     _FakeSession.instances.clear()
@@ -424,3 +428,97 @@ def test_action_count_handles_two_level_registry() -> None:
     flat = types.SimpleNamespace(registry=types.SimpleNamespace(actions={"a": 1, "b": 2}))
     assert browser_module._action_count(flat) == 2, "只有一层时也应能数出来"
     assert browser_module._action_count(types.SimpleNamespace()) == 0
+
+
+def test_prepare_environment_aligns_both_browser_timeouts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """父事件与子事件的启动超时都要对齐到配置。
+
+    实测缺陷：只对齐了 TIMEOUT_BrowserStartEvent，真正会超时的子事件
+    TIMEOUT_BrowserLaunchEvent 仍是默认 30s，于是失败信息说"等了 120s"，
+    实际 32s 就挂了，真因被藏住。
+    """
+    # 上游用的就是这种大小写混合的名字（是 browser-use 自己的约定），
+    # 所以这里按变量引用，不写字面量
+    names = ("TIMEOUT_BrowserStartEvent", "TIMEOUT_BrowserLaunchEvent")
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    browser_module.prepare_environment(tmp_path, 200)
+    for name in names:
+        assert os.environ[name] == "200.0", f"{name} 必须对齐到配置的超时"
+
+
+async def test_clear_stale_browser_only_touches_our_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """只清理使用**本 profile** 的浏览器进程，不能误伤用户自己的 Chrome。"""
+    profile = tmp_path / "browser" / "profile"
+    killed: list[int] = []
+    monkeypatch.setattr(
+        browser_module,
+        "_list_browser_processes",
+        lambda: [
+            (1, f"chrome.exe --headless=new --user-data-dir={profile}"),
+            (2, f'chrome.exe --user-data-dir="{profile}"'),  # 带引号也要认出来
+            (3, r"chrome.exe --user-data-dir=C:\Users\me\Google\Chrome\User Data"),
+            (4, "chrome.exe --type=renderer"),
+        ],
+    )
+    monkeypatch.setattr(browser_module, "_terminate_process", killed.append)
+
+    cleared = await browser_module.clear_stale_browser(profile)
+
+    assert sorted(killed) == [1, 2], f"只应杀掉占用本 profile 的进程，实际 {killed}"
+    assert cleared == 2
+
+
+async def test_clear_stale_browser_removes_leftover_lock_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """锁文件要一起清掉：进程没了但 lockfile 还在，下次启动仍会判定"已有实例"。"""
+    profile = tmp_path / "browser" / "profile"
+    profile.mkdir(parents=True)
+    (profile / "lockfile").write_text("stale", encoding="utf-8")
+    (profile / "SingletonLock").write_text("stale", encoding="utf-8")
+    monkeypatch.setattr(browser_module, "_list_browser_processes", list)
+
+    assert await browser_module.clear_stale_browser(profile) == 0
+    assert not (profile / "lockfile").exists()
+    assert not (profile / "SingletonLock").exists()
+
+
+async def test_driver_clears_stale_processes_before_start(
+    fake_browser_use: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """启动前必须清残留，否则孤儿 Chromium 会让每次启动都卡到超时。"""
+    profile = tmp_path / "browser" / "profile"
+    killed: list[int] = []
+    monkeypatch.setattr(
+        browser_module,
+        "_list_browser_processes",
+        lambda: [(7, f"chrome.exe --user-data-dir={profile}")],
+    )
+    monkeypatch.setattr(browser_module, "_terminate_process", killed.append)
+
+    driver = browser_module._BrowserActions(_settings(), tmp_path)
+    outcome = await driver.act("state", {})
+
+    assert outcome.ok, outcome.error
+    assert killed == [7], "启动前应清掉占用 profile 的残留进程"
+    await driver.aclose()
+
+
+async def test_driver_start_failure_reports_real_wait_and_cleanup(
+    fake_browser_use: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """启动失败的说明要给出真实等待时间与残留清理数，而不是"可能被占用"这种猜测。"""
+    profile = tmp_path / "browser" / "profile"
+    monkeypatch.setattr(
+        browser_module,
+        "_list_browser_processes",
+        lambda: [(7, f"chrome.exe --user-data-dir={profile}")],
+    )
+    monkeypatch.setattr(browser_module, "_terminate_process", lambda pid: None)
+    _FakeSession.start_error = RuntimeError("EventBus timed out")
+
+    driver = browser_module._BrowserActions(_settings(), tmp_path)
+    outcome = await driver.act("state", {})
+    assert "浏览器启动失败" in outcome.error
+    assert "启动前清理了" in outcome.error
+    assert "EventBus timed out" in outcome.error
+    await driver.aclose()

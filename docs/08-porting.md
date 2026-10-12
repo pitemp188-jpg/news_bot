@@ -75,8 +75,11 @@ WebSocket 流程：
 2. `op0 READY` 保存 `session_id`；之后每条 `op0` 都更新 `last_seq`。
 3. 按心跳间隔的 80% 发送 `op1 {d: last_seq}`；`op7` 表示服务端要求重连；`op9` 表示会话失效。
 4. 入站事件：`C2C_MESSAGE_CREATE`（`author.user_openid`）、`GROUP_AT_MESSAGE_CREATE`（`group_openid`、`author.member_openid`，需去掉开头的 @）。
-5. 关闭码：`4004` token 失效，刷新后重连；`4006` / `4007` / `4900–4913` 清除 session 重新 Identify；`4008` 限流等待；`4001` / `4002` / `4010–4014` / `4914` / `4915` 为致命错误（权限、沙箱、封禁），停止重连；短时间反复断开超过阈值视为配置错误。
-6. `msg_seq` 取 0–65535 的随机数，对同一个 `msg_id` 多次回复必须用不同的 seq。
+5. 关闭码：`4004` token 失效，刷新后重连；`4006` / `4007` / **`4009`** / `4900–4913` 清除 session 重新 Identify；`4008` 限流等待；`4001` / `4002` / `4010–4014` / `4914` / `4915` 为致命错误（权限、沙箱、封禁），停止重连；短时间反复断开超过阈值视为配置错误。
+   `4009`（"Session timed out"）漏掉的后果实测是**永久离线**：session 被服务端丢弃后仍带着它 Resume，服务端既不回 RESUMED 也不报错，就那样静默一小时再发一次 4009，于是无限循环、进程健康、机器人收不到任何消息（实测离线 33 小时）。
+   **库抛的关闭必须转成带关闭码的 `QQCloseError`**：`websockets` 的 `ConnectionClosed` 不带关闭码地落到通用 `except` 分支，上面所有按码分支就全都走不到。16.x 里关闭码在 `rcvd.code` / `sent.code` 上（`ConnectionClosed.code` 已废弃且无帧时返回 1006，会掩盖原因）。
+6. 链路存活要有上限：心跳是唯一的存活信号（服务端每收到一次心跳回一个 `op11`），连续几个心跳周期收不到任何帧就主动断开重连。不设上限的话链路半死时 `recv()` 会一直阻塞——实测一次重连周期长达**一小时**，期间所有消息都收不到、日志里也没有任何异常。
+7. `msg_seq` 取 0–65535 的随机数，对同一个 `msg_id` 多次回复必须用不同的 seq。
 
 hermes 订阅了 `(1<<25)|(1<<30)|(1<<12)|(1<<26)`（单聊群聊、频道、频道私信、按钮交互）。**本项目只订阅 `1<<25`**，减少因权限不足触发 `4014` 的概率。
 
@@ -180,7 +183,8 @@ browser-use 是成熟内核，但**默认配置在我们的环境里跑不起来
 | `enable_default_extensions` | `True` | 启动时联网下载 uBlock 等扩展，受限网络下 CRX 无效并把启动拖过 30s | 关掉 |
 | `use_vision` | `True` | 非视觉模型收到截图会报错，且白烧 token | 显式 `False` |
 | 浏览器会话 | 每次新建 | 启动约 4s，重复任务纯浪费 | 复用同一个 `BrowserSession`，`aclose()` 收尾 |
-| `TIMEOUT_BrowserStartEvent` | 30s | 冷启动或被残留进程占用时莫名失败，错误信息只有一串事件名 | 用环境变量对齐到 `agent.browser_timeout_seconds` |
+| `TIMEOUT_BrowserStartEvent` | 30s | 冷启动或被残留进程占用时莫名失败，错误信息只有一串事件名 | 用环境变量对齐到 `agent.browser_timeout_seconds`。**同一个超时有两个**（父事件 `BrowserStartEvent` 与子事件 `BrowserLaunchEvent`），只对齐父事件没用：实测失败发生在子事件上，而报错只说父事件"等了 120s"，实际 32s 就挂了 |
+| 残留进程 | 不处理 | 服务被强杀（关机、任务管理器、看护重启）时 Chromium 变成孤儿继续持有 `user-data-dir`，之后**每次**启动都卡在等锁上一分钟 | 启动前 `clear_stale_browser()`：只杀命令行里明确写了**本 profile** 的进程（不会误伤用户自己的 Chrome），并清掉 `lockfile` 等残留锁 |
 | 运行产物 | `~/.cache`、`~/.config` | 违反“运行时产物只写 `data/`” | 改 `XDG_CACHE_HOME`、`XDG_CONFIG_HOME`、`BROWSER_USE_CONFIG_DIR` 指向 `data/browser/` |
 | 匿名遥测 | 开启 | 受限网络里是纯粹拖慢 | `ANONYMIZED_TELEMETRY=false` |
 | 输出契约 | 无 | **会编造未被要求的字段**（详见下） | `TASK_SUFFIX` 逐条禁止 |
@@ -197,10 +201,13 @@ browser-use 是成熟内核，但**默认配置在我们的环境里跑不起来
 
 ### 已知限制
 
-- 残留的浏览器进程会占住 profile 目录，导致后续启动被判超时。因此 `App.stop()` 必须走到
-  `runner.aclose()`（见 `fix(app): 关闭服务时回收 Agent 工具`）；调试时若强杀进程，需按命令行
-  过滤清理 `chrome.exe`，切勿误杀用户自己的浏览器。
+- **残留的浏览器进程会占住 profile 目录**：服务被强杀（关机、任务管理器、看护重启）时
+  Chromium 不会跟着死，孤儿进程继续持有 `data/browser/profile`，之后每次启动都卡在等锁上
+  直到子事件超时。实测残留存在时启动 **32.1s 后失败**，清掉后 **3.6s 成功**。
+  处理方式是在启动前调 `clear_stale_browser()` 自动清理（只杀命令行里写了本 profile 的进程，
+  不碰用户自己的 Chrome）。`App.stop()` 仍必须走到 `runner.aclose()`，自动清理只是兜底。
 - 复用 `data/browser/profile` 是为将来复用登录态（如需要登录的站点）留的位置，目前尚未做登录。
+  代价是同一台机器上只能有一个实例在用这个 profile。
 
 ## 7. 移植记录
 
