@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
@@ -61,6 +63,13 @@ _BLOCKED_HINTS = (
     "cloudflare",
     "blocked",
 )
+# 浏览器进程名：browser-use 用系统 Chrome 或自带 chromium
+_BROWSER_NAMES = ("chrome", "chromium", "headless_shell")
+# Chromium 在 user-data-dir 里留的锁。残留进程被杀掉后这些文件还在，
+# 不清掉下次启动仍会判定"已有实例在跑"
+_STALE_LOCK_FILES = ("lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie")
+# 杀掉残留进程后等它真正退出的上限
+_STALE_WAIT_SECONDS = 5.0
 
 
 def prepare_environment(data_dir: Path, timeout_seconds: int) -> None:
@@ -78,7 +87,13 @@ def prepare_environment(data_dir: Path, timeout_seconds: int) -> None:
     os.environ.setdefault("XDG_CACHE_HOME", str(root / "cache"))
     os.environ.setdefault("XDG_CONFIG_HOME", str(root / "config"))
     os.environ.setdefault("BROWSER_USE_CONFIG_DIR", str(root / "config" / "browseruse"))
-    os.environ.setdefault("TIMEOUT_BrowserStartEvent", str(float(timeout_seconds)))
+    # 起浏览器链路上有**两个**独立超时，都要对齐：父事件 BrowserStartEvent 与子事件
+    # BrowserLaunchEvent 各自默认 30s。只对齐父事件没用——实测失败发生在子事件上
+    # （bubus 日志：LocalBrowserWatchdog.on_BrowserLaunchEvent ⌛️ 30s/30s ⬅️ TIMEOUT
+    # HERE），而异常信息只提父事件"timed out after 120.0s"，看上去像 120s 的事，
+    # 真因完全被藏住了。
+    for name in ("TIMEOUT_BrowserStartEvent", "TIMEOUT_BrowserLaunchEvent"):
+        os.environ.setdefault(name, str(float(timeout_seconds)))
 
 
 def browser_use_available() -> bool:
@@ -88,6 +103,74 @@ def browser_use_available() -> bool:
     except ImportError:
         return False
     return True
+
+
+def _list_browser_processes() -> list[tuple[int, str]]:
+    """列出所有浏览器进程的 (pid, 命令行)。
+
+    psutil 由 browser-use 带入（它是 browser-use 的必装依赖），这里不新增依赖。
+    取不到就返回空列表：清理是尽力而为，不该让启动流程因此失败。
+    """
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - browser-use 会带上它
+        return []
+    found: list[tuple[int, str]] = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            name = str(proc.info.get("name") or "").lower()
+            if not any(token in name for token in _BROWSER_NAMES):
+                continue
+            found.append((int(proc.info["pid"]), " ".join(proc.info.get("cmdline") or [])))
+        except Exception:
+            # 进程刚好退出、没权限读命令行都会抛；清理是尽力而为，跳过即可
+            continue
+    return found
+
+
+def _terminate_process(pid: int) -> None:
+    """强杀一个进程；抽成函数便于测试替换。"""
+    import psutil
+
+    psutil.Process(pid).kill()
+
+
+async def clear_stale_browser(profile_dir: Path) -> int:
+    """清掉占用指定 profile 的残留浏览器进程与锁文件，返回清掉的进程数。
+
+    为什么必须有这一步：服务被强杀（关机、任务管理器、看护重启）时 Chromium 不会
+    跟着死，会变成孤儿继续持有 user-data-dir，之后每次启动都卡在等这个锁上直到
+    子事件超时。实测：残留存在时启动 32.1s 后失败，清掉后 3.6s 成功。
+
+    安全性：只杀命令行里明确写了**本 profile** 的进程。用户自己的 Chrome 用的是
+    别的 user-data-dir，不会被误伤。
+    """
+    marker = f"--user-data-dir={profile_dir}".lower()
+    stale = [pid for pid, cmdline in _list_browser_processes() if marker in cmdline.replace('"', "").lower()]
+    for pid in stale:
+        with contextlib.suppress(Exception):
+            _terminate_process(pid)
+    if stale:
+        logger.warning("清理 %d 个占用 profile 的残留浏览器进程", len(stale))
+        await _wait_gone(stale)
+    for name in _STALE_LOCK_FILES:
+        with contextlib.suppress(OSError):
+            (profile_dir / name).unlink(missing_ok=True)
+    return len(stale)
+
+
+async def _wait_gone(pids: list[int]) -> None:
+    """等被杀进程真正退出，最多 `_STALE_WAIT_SECONDS`。
+
+    不等的话紧接着启动仍可能撞上还没释放的 profile 句柄。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _STALE_WAIT_SECONDS
+    while loop.time() < deadline:
+        alive = {pid for pid, _ in _list_browser_processes()}
+        if not alive.intersection(pids):
+            return
+        await asyncio.sleep(0.2)
 
 
 @dataclass
@@ -157,7 +240,11 @@ class _BrowserActions:
         async with self._lock:
             if self._session is not None:
                 return self._session, self._tools
+            profile_dir = self._data_dir / "browser" / "profile"
             prepare_environment(self._data_dir, self._settings.browser_timeout_seconds)
+            # 启动前先清残留：强杀过服务（关机、任务管理器、看护重启）会留下孤儿
+            # Chromium 继续持有 user-data-dir，之后每次启动都卡在等锁上直到超时。
+            cleared = await clear_stale_browser(profile_dir)
             from browser_use import BrowserProfile, BrowserSession
             from browser_use.tools.service import Tools
 
@@ -166,17 +253,23 @@ class _BrowserActions:
                 # 默认扩展需要联网下载，网络受限时会把启动拖过超时（实测 44s 未就绪）
                 enable_default_extensions=False,
                 # profile 落在 data/ 下，为将来复用登录态留出位置
-                user_data_dir=str(self._data_dir / "browser" / "profile"),
+                user_data_dir=str(profile_dir),
             )
             session = BrowserSession(browser_profile=profile)
+            started = time.monotonic()
             try:
                 await session.start()
                 await _wait_ready(session, SESSION_READY_TIMEOUT)
             except Exception as exc:
                 await _stop_quietly(session)
-                # 原始信息只有一串事件名，补上可操作的解释
+                # 失败也别留残余：半启动的 Chromium 会继续占着 profile，
+                # 让下一次尝试以同样的方式失败
+                await clear_stale_browser(profile_dir)
+                cleared_note = f"，启动前清理了 {cleared} 个残留进程" if cleared else ""
                 raise RuntimeError(
-                    f"浏览器启动失败（可能被残留的浏览器进程占用 profile）: {type(exc).__name__}: {exc}"
+                    f"浏览器启动失败（等待 {time.monotonic() - started:.0f}s{cleared_note}）："
+                    f"常见原因是系统繁忙导致 Chromium 冷启动过慢、Chrome 未安装或 profile 目录被占用。"
+                    f" {type(exc).__name__}: {exc}"
                 ) from exc
             # 先记下会话：这一行之后的任何失败（构造动作表、写日志）都必须让
             # aclose 仍能回收进程，否则就漏一个 Chromium（实测漏过一次）
