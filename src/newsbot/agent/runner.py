@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from newsbot.agent.prompts import build_messages
@@ -129,13 +131,31 @@ def _assistant_message(content: str, calls: list[ToolCall]) -> dict[str, Any]:
 class Runner:
     """工具调用循环；步数、token 双重预算，超限即收敛并说明情况。"""
 
-    def __init__(self, llm: LLM, tools: list[Tool], settings: AgentSection) -> None:
+    def __init__(
+        self,
+        llm: LLM,
+        tools: list[Tool],
+        settings: AgentSection,
+        *,
+        timezone: str = "Asia/Shanghai",
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
         self._llm = llm
         self._tools = {tool.name: tool for tool in tools}
         self._settings = settings
+        # 时区与时钟：提示词里要告知"现在是几号"，否则"最近一天""最新"这类要求
+        # 模型无法执行（实测会把几天前的旧稿当成最新）。挂机模式下每次运行都要
+        # 重新取时间，所以留成可注入的时钟而不是构造时就固定。
+        self._timezone = timezone
+        self._now = now
 
     async def run(self, query: str, history: list[dict[str, Any]] | None = None) -> Findings:
-        messages = build_messages(query, history)
+        messages = build_messages(
+            query,
+            history,
+            now=self._now() if self._now else None,
+            timezone=self._timezone,
+        )
         schemas = [tool_schema(tool) for tool in self._tools.values()]
         registry = SourceRegistry()
         usages: list[Usage] = []

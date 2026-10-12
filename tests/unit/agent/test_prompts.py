@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from newsbot.agent.prompts import SYSTEM_PROMPT, build_messages
 
 
@@ -86,3 +88,50 @@ def test_invalid_and_blank_turns_are_skipped() -> None:
 
 def test_query_is_stripped() -> None:
     assert build_messages("  空格问题  ")[-1]["content"] == "空格问题"
+
+
+# ── 时间意识 ──
+# 实测缺陷：提示词里原本没有任何"今天是几号"，于是日报把 10-08 的旧稿当成"最新进展"、
+# 把 10-10 写成"最近一天"（报告实际生成于 10-11）。模型没有这个事实就无法执行
+# "最近一天""最新"这类要求。
+
+
+def test_system_message_carries_current_time_and_timezone() -> None:
+    moment = datetime(2026, 10, 12, 14, 30, tzinfo=UTC)
+    system = build_messages("今天有什么新闻", now=moment, timezone="Asia/Shanghai")[0]["content"]
+    assert "2026-10-12 22:30" in system, "应按指定时区渲染（UTC 14:30 ＝ 北京 22:30）"
+    assert "Asia/Shanghai" in system
+    assert "周一" in system, "2026-10-12 是周一"
+
+
+def test_time_rule_makes_dates_the_only_basis_for_freshness() -> None:
+    system = build_messages("问", now=datetime(2026, 10, 12, tzinfo=UTC))[0]["content"]
+    assert "唯一依据" in system
+    assert "日期未知" in system, "没有日期的条目要能被识别为无法判断新旧"
+    assert "不要凭印象推断" in system
+
+
+def test_time_is_rendered_per_call_not_frozen() -> None:
+    """时间必须每次调用重新取：进程要挂机跑很多天，写成模块常量会一直停在启动那天。"""
+    first = build_messages("问", now=datetime(2026, 10, 12, 8, 0, tzinfo=UTC))[0]["content"]
+    second = build_messages("问", now=datetime(2026, 10, 20, 8, 0, tzinfo=UTC))[0]["content"]
+    assert first != second
+    assert "2026-10-12" in first and "2026-10-20" in second
+
+
+def test_naive_time_is_treated_as_local_zone() -> None:
+    system = build_messages("问", now=datetime(2026, 10, 12, 9, 0), timezone="Asia/Shanghai")[0]["content"]
+    assert "2026-10-12 09:00" in system, "无时区的时间应按时区解释，不要再平移一次"
+
+
+def test_bad_timezone_falls_back_instead_of_crashing() -> None:
+    """时区名写错不该让整个任务起不来，退回本机时区继续。"""
+    system = build_messages("问", now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC), timezone="Not/AZone")[0]["content"]
+    assert "2026-10-12" in system
+
+
+def test_age_gap_survives_long_running_process() -> None:
+    """挂机模式下每次运行都要看到当天日期，而不是上次运行留下的。"""
+    runner_time = datetime(2026, 10, 12, 2, 0, tzinfo=UTC)
+    system = build_messages("问", now=runner_time)[0]["content"]
+    assert "2026-10-12" in system

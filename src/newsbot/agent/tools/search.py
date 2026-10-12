@@ -12,7 +12,7 @@ import binascii
 import email.utils
 import html as html_mod
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
 import httpx
@@ -262,17 +262,81 @@ def _score(item: dict[str, Any], tokens: list[str]) -> float:
     return score * float(item.get("weight", 1.0))
 
 
-def match_feed_items(items: list[dict[str, Any]], query: str, limit: int) -> tuple[list[dict[str, Any]], str]:
+def _short_time(published: str) -> str:
+    """把 ISO 时间压成「MM-DD HH:MM」给模型看；解析不了就诚实标注"日期未知"。
+
+    为什么必须标出来：日期是模型判断新鲜度的唯一依据。缺了它，模型只能拿训练
+    数据里的印象补——实测就出现过把几天前的旧稿当成"最新进展"。写"日期未知"
+    至少让模型知道这一条无法判断新旧。
+    """
+    if not published:
+        return "日期未知"
+    try:
+        stamp = datetime.fromisoformat(published.replace("Z", "+00:00"))
+    except ValueError:
+        return "日期未知"
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    local = stamp.astimezone()
+    return f"{local:%m-%d %H:%M}"
+
+
+def _recent(items: list[dict[str, Any]], days: int | None, now: datetime) -> tuple[list[dict[str, Any]], int]:
+    """按时间窗过滤；返回（保留的条目, 因过旧被丢弃的条数）。
+
+    日期未知的条目**保留**：判不了新旧不等于就是旧的，直接丢会误伤。
+    """
+    if not days:
+        return items, 0
+    since = now - timedelta(days=days)
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for item in items:
+        published = str(item.get("published") or "")
+        if not published:
+            kept.append(item)
+            continue
+        try:
+            stamp = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        except ValueError:
+            kept.append(item)
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        if stamp < since:
+            dropped += 1
+            continue
+        kept.append(item)
+    return kept, dropped
+
+
+def match_feed_items(
+    items: list[dict[str, Any]],
+    query: str,
+    limit: int,
+    *,
+    days: int | None = None,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], str]:
     """按检索词过滤订阅源条目，并按相关度 → 发布时间排序；返回（结果, 反馈）。
 
     订阅源是"最新内容流"而不是搜索索引，常常只命中部分检索词。反馈必须如实说
     清楚**哪些词没命中**，这是 Agent 决定"改写检索词还是收手"的唯一依据——
     把没命中的词悄悄删掉，等于把反馈信号也删掉了。
+
+    `days` 来自模型的 `time_range`：订阅源虽然本身是内容流，但实测有的源会夹带
+    几个月前的旧文（Wired 的 feed 里就有），只靠"源是最新的"保证不了"条目是新的"，
+    所以这里按发布日期真的过滤，并把丢弃条数如实告知。
     """
+    moment = now or datetime.now(UTC)
+    fresh, dropped = _recent(items, days, moment)
+    if not fresh:
+        return [], f"这些订阅源里没有最近 {days} 天内的条目（已过滤掉 {dropped} 条更早的）。"
+
     tokens = [token.lower() for token in query_tokens(query)]
-    scored = [(item, _score(item, tokens)) for item in items]
+    scored = [(item, _score(item, tokens)) for item in fresh]
     matched = [(item, score) for item, score in scored if score > 0]
-    pool = matched or [(item, 0.0) for item in items]
+    pool = matched or [(item, 0.0) for item in fresh]
     pool.sort(key=lambda pair: (pair[1], pair[0]["published"] or ""), reverse=True)
 
     seen: set[str] = set()
@@ -285,13 +349,17 @@ def match_feed_items(items: list[dict[str, Any]], query: str, limit: int) -> tup
         if len(unique) >= limit:
             break
 
+    notes: list[str] = []
+    if dropped:
+        notes.append(f"已按时间范围过滤掉 {dropped} 条更早的条目。")
     if not matched:
-        return unique, "没有条目包含这些检索词中的任何一个，以下是各源最新内容（请改写检索词）："
+        notes.append("没有条目包含这些检索词中的任何一个，以下是各源最新内容（请改写检索词）：")
+        return unique, " ".join(notes)
     body = [(i["title"] + i["snippet"]).lower() for i, _ in matched]
     missing = [token for token in tokens if not any(_hit(token, text) for text in body)]
     if missing and len(tokens) > 1:
-        return unique, f"这些检索词没有任何条目同时包含：{'、'.join(missing)}。以下条目只命中了其余的词："
-    return unique, ""
+        notes.append(f"这些检索词没有任何条目同时包含：{'、'.join(missing)}。以下条目只命中了其余的词：")
+    return unique, " ".join(notes)
 
 
 class SearchTool:
@@ -299,8 +367,8 @@ class SearchTool:
 
     name = "search"
     description = (
-        "检索互联网，返回标题、链接与摘要。传检索词（空格分隔的核心词效果最好）；"
-        "结果里会如实告诉你哪些词没有命中，据此决定是否改写检索词。"
+        "检索互联网，返回标题、链接、摘要与**发布日期**。传检索词（空格分隔的核心词效果最好）；"
+        "结果里会如实告诉你哪些词没有命中、以及按时间范围过滤掉了多少条，据此决定是否改写检索词。"
     )
     parameters: ClassVar[dict[str, Any]] = {
         "type": "object",
@@ -312,7 +380,10 @@ class SearchTool:
             "time_range": {
                 "type": "string",
                 "enum": ["day", "week", "month"],
-                "description": "限定时间范围，查最新资讯时使用",
+                "description": (
+                    "限定只看最近这段时间的条目，查最新资讯时使用。"
+                    "订阅源按条目发布日期过滤；结果里标注「日期未知」的条目无法判断新旧，会被保留"
+                ),
             },
         },
         "required": ["query"],
@@ -365,7 +436,10 @@ class SearchTool:
             # 这个结构把局部编号换成全局编号，网址行带上任何后缀都会让改写失效，
             # 正文引用与来源列表就会错位（实测踩过一次）
             origin = hit.get("source") or _host(hit["url"])
-            parts = [f"{index}. {hit['title']}（{origin}）", f"   {hit['url']}"]
+            # 日期必须给模型看到：它是判断"这条新不新"的唯一依据。放在标题行——
+            # 网址行必须保持纯净，`SourceRegistry.render` 靠它改写编号
+            when = _short_time(str(hit.get("published") or ""))
+            parts = [f"{index}. {hit['title']}（{origin} · {when}）", f"   {hit['url']}"]
             if snippet.strip():
                 parts.append(f"   {snippet}")
             blocks.append("\n".join(parts))
@@ -375,6 +449,8 @@ class SearchTool:
                 url=hit["url"],
                 snippet=hit["snippet"],
                 weight=float(hit.get("weight", 1.0)),
+                published=str(hit.get("published") or ""),
+                source=str(hit.get("source") or ""),
             )
             for hit in hits
         ]
@@ -388,10 +464,10 @@ class SearchTool:
         if self.provider == "bing":
             return await self._bing(query), ""
         if self.provider == "feeds":
-            return await self._feeds_provider(query)
+            return await self._feeds_provider(query, time_range)
         return await self._searxng(query, time_range), ""
 
-    async def _feeds_provider(self, query: str) -> tuple[list[dict[str, Any]], str]:
+    async def _feeds_provider(self, query: str, time_range: str | None = None) -> tuple[list[dict[str, Any]], str]:
         """并发拉取订阅源，按关键词过滤：来源是筛选过的质量源，且给出真实文章地址。"""
         if not self._feeds:
             logger.warning("未配置任何订阅源，feeds 提供方无法工作")
@@ -406,7 +482,10 @@ class SearchTool:
 
         batches = await asyncio.gather(*(fetch(feed) for feed in self._feeds))
         hits, note = match_feed_items(
-            [item for batch in batches for item in batch], query, self._settings.search_results
+            [item for batch in batches for item in batch],
+            query,
+            self._settings.search_results,
+            days=TIME_RANGE_DAYS.get(time_range or ""),
         )
         if not hits:
             logger.warning("订阅源没有返回任何条目（共 %d 个源）", len(self._feeds))

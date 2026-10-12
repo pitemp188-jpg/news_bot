@@ -92,7 +92,12 @@ class App:
         self._llm = llm
         sessions = SessionStore(db)
         report_builder = ReportBuilder(llm, max_chars=2000)
-        runner = Runner(llm, self._build_tools(db, browser=self._browser), config.agent)
+        runner = Runner(
+            llm,
+            self._build_tools(db, browser=self._browser),
+            config.agent,
+            timezone=config.app.timezone,
+        )
         self.runner = runner
 
         authorizer = Authorizer(

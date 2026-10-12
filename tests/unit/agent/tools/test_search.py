@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -18,6 +19,7 @@ from newsbot.agent.runner import SourceRegistry
 from newsbot.agent.tools.search import (
     BING_ENDPOINT,
     SearchTool,
+    _short_time,
     clean_snippet,
     match_feed_items,
     parse_bing,
@@ -549,3 +551,125 @@ async def test_search_output_lets_source_registry_rewrite_labels() -> None:
     assert numbered, "编号行没有被改写成全局编号"
     assert lines[numbered[0] + 1].strip() == first_url, "编号行后面必须紧跟纯网址，不能有任何后缀"
     assert registry.label(first_url) == "S1"
+
+
+# ── 日期可见性与时间窗过滤 ──
+# 实测缺陷：订阅源解析出的 `published` 在组装输出与 Source 时被丢掉，模型看不到
+# 任何日期，也就无法执行"最近一天""最新"，只能拿训练数据里的印象凑（把 10-08 的
+# 旧稿当成"最新进展"）。下面把这几个环节都锁住。
+
+
+def test_short_time_formats_iso_to_local_minute() -> None:
+    assert _short_time("2026-10-09T06:59:11+00:00") == "10-09 14:59"
+    assert _short_time("") == "日期未知"
+    assert _short_time("不是时间") == "日期未知"
+
+
+def test_match_feed_items_drops_older_than_window_and_says_so() -> None:
+    now = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+    items = [
+        {"title": "今天的 AI 进展", "url": "https://a/1", "snippet": "", "published": "2026-10-12T02:00:00+00:00"},
+        {"title": "上个月的 AI 旧闻", "url": "https://a/2", "snippet": "", "published": "2026-09-01T02:00:00+00:00"},
+    ]
+    hits, note = match_feed_items(items, "AI", 8, days=1, now=now)
+    assert [hit["url"] for hit in hits] == ["https://a/1"]
+    assert "过滤掉 1 条更早的条目" in note, "过滤必须如实告知，否则模型以为源里就这么几条"
+
+
+def test_match_feed_items_keeps_undated_items() -> None:
+    """判不了新旧不等于就是旧的：没有日期的条目要保留，否则会误伤。"""
+    now = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+    items = [{"title": "AI 无日期条目", "url": "https://a/1", "snippet": "", "published": ""}]
+    hits, _ = match_feed_items(items, "AI", 8, days=1, now=now)
+    assert [hit["url"] for hit in hits] == ["https://a/1"]
+
+
+def test_match_feed_items_without_window_keeps_everything() -> None:
+    items = [
+        {"title": "AI 老条目", "url": "https://a/1", "snippet": "", "published": "2020-01-01T00:00:00+00:00"},
+    ]
+    hits, note = match_feed_items(items, "AI", 8)
+    assert hits and note == ""
+
+
+def test_all_items_too_old_is_reported_not_silently_empty() -> None:
+    now = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+    items = [{"title": "AI 旧闻", "url": "https://a/1", "snippet": "", "published": "2026-01-01T00:00:00+00:00"}]
+    hits, note = match_feed_items(items, "AI", 8, days=1, now=now)
+    assert hits == []
+    assert "没有最近 1 天内的条目" in note
+
+
+@respx.mock
+async def test_search_output_shows_publication_date() -> None:
+    """日期要出现在模型看得到的文本里，且不能落在网址行上。
+
+    网址行必须保持纯净：`SourceRegistry.render` 靠"编号行 + 纯网址行"改写编号，
+    网址行多出任何后缀都会让改写静默失效（实测踩过一次）。
+    """
+    feed = "https://good.example/feed"
+    respx.get(feed).mock(return_value=httpx.Response(200, text=FEED_FIXTURE.read_text(encoding="utf-8")))
+    tool = SearchTool(
+        AgentSection(search_results=3),
+        Secrets(search_provider="feeds"),
+        feeds=[FeedSource(url=feed)],
+    )
+    result = await tool.run("厄尔尼诺")
+    await tool.aclose()
+
+    lines = result.text.splitlines()
+    numbered = [line for line in lines if line[:2].strip().rstrip(".").isdigit()]
+    assert numbered, "用例需要编号行"
+    assert any("10-09" in line for line in numbered), f"编号行要带发布日期，实际: {result.text[:300]}"
+
+    registry = SourceRegistry()
+    registry.register(result.sources)
+    rendered = registry.render(result.text)
+    rendered_lines = rendered.splitlines()
+    index = next(i for i, line in enumerate(rendered_lines) if line.startswith("S1. "))
+    assert rendered_lines[index + 1].strip() == result.sources[0].url, "网址行必须无后缀"
+
+
+@respx.mock
+async def test_search_sources_carry_date_and_origin() -> None:
+    """`Source` 必须把日期与来源名带给下游，否则入库后无从判断新旧与权威性。"""
+    feed = "https://good.example/feed"
+    respx.get(feed).mock(return_value=httpx.Response(200, text=FEED_FIXTURE.read_text(encoding="utf-8")))
+    tool = SearchTool(
+        AgentSection(search_results=3),
+        Secrets(search_provider="feeds"),
+        feeds=[FeedSource(url=feed)],
+    )
+    result = await tool.run("厄尔尼诺")
+    await tool.aclose()
+
+    first = result.sources[0].as_dict()
+    assert first["published"].startswith("2026-10-09"), "发布日期要随来源传下去"
+    assert first["source"] == "good.example"
+
+
+@respx.mock
+async def test_time_range_filters_feeds() -> None:
+    """`time_range` 对订阅源必须真的生效，而不是被静默忽略。"""
+    feed = "https://good.example/feed"
+    respx.get(feed).mock(return_value=httpx.Response(200, text=FEED_FIXTURE.read_text(encoding="utf-8")))
+    tool = SearchTool(
+        AgentSection(search_results=8),
+        Secrets(search_provider="feeds"),
+        feeds=[FeedSource(url=feed)],
+    )
+    wide = await tool.run("厄尔尼诺")
+    narrow = await tool.run("厄尔尼诺", time_range="day")
+    await tool.aclose()
+
+    # 夹具里的条目发布于 2026-10-09，距现在远超一天
+    dated_url = "https://www.solidot.org/story?sid=85569"
+    assert dated_url in {source.url for source in wide.sources}, "不传时间范围应拿到这条"
+    assert "过滤掉 4 条更早的条目" in narrow.text, "过滤必须如实汇报条数"
+    # 有日期且超出范围的条目必须被剔除
+    assert dated_url not in {source.url for source in narrow.sources}, "超出时间范围的条目应被过滤掉"
+    # 无日期的条目按设计保留（判不了新旧≠就是旧的），但必须标成「日期未知」，
+    # 让模型知道这几条无法判断新鲜度
+    assert narrow.sources, "无日期条目应保留"
+    assert all(source.published == "" for source in narrow.sources), "剩下的都应是无日期条目"
+    assert "日期未知" in narrow.text

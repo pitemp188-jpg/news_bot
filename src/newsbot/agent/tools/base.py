@@ -17,17 +17,27 @@ class Source:
     `snippet` 与 `weight` 不只是展示用：去重要靠 `snippet` 判断"这是不是同一件事
     的另一家报道"（只比对标题判不出来），要靠 `weight` 在同一件事的多家报道里
     挑出质量最高的那条保留。字段少了这两个，去重就只能退化成按网址过滤。
+
+    `published` 与 `source` 同理不是装饰：发布日期是模型判断"这条新不新"的**唯一**
+    依据，来源名是判断"够不够权威"的依据。曾经这两个字段在订阅源解析出来之后被
+    丢掉，模型看不到任何日期，于是把几天前的旧稿当成"最新进展"（实测）。
     """
 
     title: str
     url: str
     snippet: str = ""
     weight: float = 1.0
+    published: str = ""
+    source: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"title": self.title, "url": self.url}
         if self.snippet:
             data["snippet"] = self.snippet
+        if self.published:
+            data["published"] = self.published
+        if self.source:
+            data["source"] = self.source
         data["weight"] = self.weight
         return data
 

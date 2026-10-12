@@ -26,6 +26,23 @@ logger = get_logger(__name__)
 _CITATION = re.compile(r"\[S(\d+)\]")
 
 
+def _published_at(raw: Any) -> datetime | None:
+    """把来源里的 ISO 发布时间解析成 datetime；解析不了就返回 None。
+
+    容错而非报错：有的源不给日期、有的格式不规范，这些都不该让入库失败——只是
+    这一条的"新鲜度未知"，模型会看到「日期未知」。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        logger.debug("无法解析的发布时间: %r", text[:40])
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
+
+
 class Runner(Protocol):
     """Agent 规划循环：查询 → 带来源的采集结果。"""
 
@@ -237,6 +254,10 @@ class Pipeline:
                             url_hash=digest,
                             title=str(item.get("title", "")),
                             source=str(item.get("source", "")),
+                            # 发布时间必须存：它是判断"这条新不新"的依据。此前一直留空，
+                            # 于是模型看不到任何日期，把几天前的旧稿当成"最新进展"；
+                            # news_db 也只能拿抓取时间当新鲜度，旧闻重抓就被算成新的。
+                            published_at=_published_at(item.get("published")),
                             content_hash=content_digest(body),
                             simhash=simhash_hex(simhash64(body)),
                             fetched_at=datetime.now(UTC),
