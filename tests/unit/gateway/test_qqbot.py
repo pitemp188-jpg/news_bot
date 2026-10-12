@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import types
 
 import httpx
 import pytest
 import respx
 from tests.fakes.qq_gateway import FakeWS, c2c_message, control, group_message, hello, ready
+from websockets.exceptions import ConnectionClosed
 
 from newsbot.core.config import Secrets
 from newsbot.gateway import qqbot as qq_module
@@ -515,3 +517,126 @@ async def test_dispatch_requires_handler() -> None:
 
 async def test_send_result_helper_shape() -> None:
     assert SendResult.success().ok is True
+
+
+def _closed(code: int) -> Exception:
+    """造一个 websockets 风格的关闭异常（16.x 里关闭码在 rcvd/sent 上）。"""
+    exc = ConnectionClosed(None, None)
+    exc.rcvd = types.SimpleNamespace(code=code, reason="Session timed out")
+    return exc
+
+
+async def test_library_close_is_translated_with_its_code() -> None:
+    """websockets 抛的关闭必须带上真实关闭码。
+
+    实测缺陷：库抛的关闭走的是通用 `except Exception` 分支，只记一句日志，
+    关闭码**全部**丢失——4004（刷新 token）、4009（清会话）、4013（不可恢复）
+    这些处理分支根本没机会执行。实测机器人因此离线 33 小时。
+    """
+    adapter = _adapter()
+    adapter._ws = FakeWS([_closed(4009)])
+    adapter._running = True
+    with pytest.raises(QQCloseError) as info:
+        await adapter._read_events()
+    assert info.value.code == 4009
+
+
+def test_session_timeout_code_invalidates_session() -> None:
+    """4009 必须归入会话失效集合，否则会一直 Resume 一个已作废的 session。"""
+    assert 4009 in qq_module.SESSION_INVALID_CLOSE_CODES
+
+
+class _HangingWS:
+    """永不吐帧的连接：模拟半死链路（TCP 还在，对端不再回话）。"""
+
+    async def recv(self) -> str:
+        await asyncio.Event().wait()
+        raise AssertionError("不会执行到这里")
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_session_timeout_clears_session_so_next_hello_identifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """收到 4009 后要清掉 session，下一次 HELLO 走 Identify 而不是 Resume。
+
+    这是实测的永久离线路径：session 被服务端丢弃后仍带着它 Resume，服务端既不回
+    RESUMED 也不报错，只能等下一次 4009（每次一小时），于是无限循环。
+    """
+    adapter = _adapter()
+    ws = FakeWS()
+    adapter._ws = ws
+    adapter._session_id = "stale"
+    adapter._last_seq = 9
+    adapter._running = True
+    calls = 0
+
+    async def sequence() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise QQCloseError(4009, "Session timed out")
+        adapter._running = False
+
+    async def instant(_seconds: float = 0.0) -> None:
+        return None
+
+    async def reopen() -> None:
+        return None
+
+    monkeypatch.setattr(adapter, "_read_events", sequence)
+    monkeypatch.setattr(adapter, "_open_ws", reopen)
+    monkeypatch.setattr(qq_module.asyncio, "sleep", instant)
+    await adapter._listen_loop()
+
+    assert adapter._session_id is None, "4009 后必须清掉 session"
+    assert adapter._last_seq is None
+
+    # 先撤销 sleep 替换：`qq_module.asyncio` 就是全局 asyncio，把它换成 instant 之后
+    # _settle() 里的 sleep(0) 不再让出事件循环，_spawn 出去的任务永远不会执行。
+    monkeypatch.undo()
+    # 再收到 HELLO 时必须重新 Identify（而不是用作废的 session 去 Resume）
+    _preauth(adapter)
+    adapter._handle_payload(hello())
+    await _settle()
+    kinds = [frame["op"] for frame in ws.sent]
+    assert qq_module.OP_IDENTIFY in kinds, f"应重新 Identify，实际发送 {kinds}"
+    assert qq_module.OP_RESUME not in kinds, "session 已作废，不该再 Resume"
+
+
+async def test_silent_link_is_dropped_after_frame_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """长时间收不到任何帧要主动断开，不能静默挂着。
+
+    实测链路半死时 recv() 会一直阻塞，一次重连周期长达一小时，这期间所有消息都
+    收不到，日志里也没有任何异常。
+    """
+    adapter = _adapter()
+    adapter._ws = _HangingWS()
+    adapter._running = True
+    # 存活上限有 30s 下限（避免把正常链路误判为已死，由 test_frame_timeout_has_a_floor
+    # 覆盖），要让本测试秒级完成就得连下限一起改小
+    monkeypatch.setattr(qq_module, "MIN_FRAME_TIMEOUT", 0.02)
+    monkeypatch.setattr(adapter, "_heartbeat_interval", 0.01)
+    # 外面再套一层 wait_for：缺了存活上限时这里必须**失败**而不是把测试永久挂住，
+    # 否则 CI 会一直卡着不返回（实测会挂死）
+    with pytest.raises(QQCloseError) as info:
+        await asyncio.wait_for(adapter._read_events(), timeout=5.0)
+    assert "静默" in info.value.reason
+
+
+def test_frame_timeout_has_a_floor() -> None:
+    """心跳周期很小时也要留出下限，否则会把正常链路误判为已死。"""
+    adapter = _adapter()
+    adapter._heartbeat_interval = 0.001
+    assert adapter._frame_timeout >= qq_module.MIN_FRAME_TIMEOUT
+
+
+def test_close_code_falls_back_to_sent_frame() -> None:
+    """只收到对方关闭时 rcvd 为空，要退到 sent 的关闭码。"""
+    exc = ConnectionClosed(None, None)
+    exc.rcvd = None
+    exc.sent = types.SimpleNamespace(code=1000, reason="ok")
+    assert qq_module._close_code(exc) == 1000
+    assert qq_module._close_code(RuntimeError("普通异常")) is None

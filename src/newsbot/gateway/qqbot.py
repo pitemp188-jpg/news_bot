@@ -31,6 +31,12 @@ GATEWAY_PATH = "/gateway"
 MAX_MESSAGE_LENGTH = 1500
 API_TIMEOUT = 15.0
 CONNECT_TIMEOUT = 15.0
+# 链路存活判定：心跳是唯一的存活信号（服务端每收到一次心跳会回一个 op 11），所以
+# 连续几个心跳周期收不到任何帧就认为链路已死、主动断开重连。不加这个上限的后果
+# 实测是静默一小时才断——这期间所有消息都收不到，而日志里一片安静。
+FRAME_TIMEOUT_FACTOR = 2.5
+MIN_FRAME_TIMEOUT = 30.0
+
 # 只订阅单聊与群 @ 消息，避免因权限不足触发 4014
 INTENTS = 1 << 25
 RECONNECT_BACKOFF = (2, 5, 15, 30, 60)
@@ -59,7 +65,11 @@ FATAL_CLOSE_CODES = {
     4915: "机器人已被封禁",
 }
 # 会话失效的关闭码：清空 session 后重新 Identify
-SESSION_INVALID_CLOSE_CODES = {4006, 4007} | set(range(4900, 4914))
+# 4009（"Session timed out"）**必须**在里面。实测漏掉它的后果是永久离线：Resume
+# 一直带着一个服务端已丢弃的 session，服务端既不回 RESUMED 也不报错，就那样静默
+# 到下一次 4009（每次白白浪费整整一小时），而 4009 又不在不可恢复集合里，于是无限
+# 重连、进程健康、机器人再也收不到消息——实测这样离线了 33 小时。
+SESSION_INVALID_CLOSE_CODES = {4006, 4007, 4009} | set(range(4900, 4914))
 
 INBOUND_HANDLERS = {
     "C2C_MESSAGE_CREATE": "c2c",
@@ -74,6 +84,19 @@ class QQCloseError(Exception):
         self.code = int(code) if code else None
         self.reason = str(reason or "")
         super().__init__(f"WebSocket 关闭 code={self.code} reason={self.reason}")
+
+
+def _close_code(exc: Exception) -> int | None:
+    """从 websockets 抛的关闭异常里取真实关闭码。
+
+    16.x 里必须读 `rcvd` / `sent`：`ConnectionClosed.code` 已废弃（访问会告警），
+    而且在「没收到关闭帧」时它直接返回 1006，把真实原因盖掉。
+    """
+    for attr in ("rcvd", "sent"):
+        code = getattr(getattr(exc, attr, None), "code", None)
+        if isinstance(code, int):
+            return code
+    return None
 
 
 class QQBotAdapter(BaseAdapter):
@@ -288,7 +311,9 @@ class QQBotAdapter(BaseAdapter):
             except Exception as exc:
                 if not self._running:
                     return
-                logger.warning("[qqbot] WebSocket 异常: %s", exc)
+                # 带上异常类型：实测连接超时抛的是 TimeoutError，它的 str() 是空的，
+                # 只打 %s 就成了"WebSocket 异常: "，完全看不出发生了什么
+                logger.warning("[qqbot] WebSocket 异常: %s: %s", type(exc).__name__, exc)
             if backoff_index >= RECONNECT_WARN_ATTEMPTS:
                 # 只降级日志，**绝不放弃重连**：这个进程要挂机跑一整天，必须能自愈。
                 # 原来这里是"超过 5 次就 self._running = False 退出循环"，而计数只在
@@ -304,17 +329,35 @@ class QQBotAdapter(BaseAdapter):
             try:
                 await self._open_ws()
             except Exception as exc:
-                logger.warning("[qqbot] 重连失败: %s", exc)
+                logger.warning("[qqbot] 重连失败: %s: %s", type(exc).__name__, exc)
 
     async def _read_events(self) -> None:
         ws = self._ws
         if ws is None:
             raise RuntimeError("WebSocket 未连接")
         while self._running and self._ws is ws:
-            raw = await ws.recv()
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=self._frame_timeout)
+            except TimeoutError as exc:
+                # 只收不到帧就断：链路可能半死（TCP 还在、对端已不再回话）。
+                # 服务端每收到一次心跳都会回一个 op 11，所以这是可靠的存活信号。
+                raise QQCloseError(None, f"静默 {self._frame_timeout:.0f}s 未收到任何帧") from exc
+            except Exception as exc:
+                # websockets 抛的关闭必须带上真实关闭码转成 QQCloseError。否则
+                # 4004（token 失效）、4009（会话超时）、4013（无效 intents）这些处理
+                # 分支永远走不到——它们都只在 QQCloseError 这条路径上。
+                code = _close_code(exc)
+                if code is None:
+                    raise
+                raise QQCloseError(code, str(exc)) from exc
             if raw is None:  # 对端关闭
                 raise QQCloseError(None, "connection closed")
             self._handle_payload(raw)
+
+    @property
+    def _frame_timeout(self) -> float:
+        """多久收不到任何帧就判定链路已死。"""
+        return max(MIN_FRAME_TIMEOUT, self._heartbeat_interval * FRAME_TIMEOUT_FACTOR)
 
     def _handle_payload(self, raw: str | bytes) -> None:
         """解析一帧；心跳、Identify、Resume 由本方法负责。"""
@@ -373,7 +416,8 @@ class QQBotAdapter(BaseAdapter):
                 },
             }
         )
-        logger.debug("[qqbot] 已发送 Identify")
+        # info 而非 debug：握手是否真的发生是排查"连上了但收不到消息"的第一线索
+        logger.info("[qqbot] 已发送 Identify")
 
     async def _send_resume(self) -> None:
         token = await self._ensure_token()
@@ -387,7 +431,7 @@ class QQBotAdapter(BaseAdapter):
             self._session_id = None
             self._last_seq = None
         else:
-            logger.debug("[qqbot] 已发送 Resume")
+            logger.info("[qqbot] 已发送 Resume session=%s seq=%s", safe_id(self._session_id), self._last_seq)
 
     async def _send_json(self, payload: dict[str, Any]) -> bool:
         ws = self._ws
