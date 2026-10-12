@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from newsbot.core.models import Delivery, NewsItem, Report, Schedule, Task
+from newsbot.core.models import Delivery, NewsItem, Report, ReportItem, Schedule, Story, StoryScore, Task
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -83,4 +83,40 @@ def delivery_dict(row: Delivery) -> dict[str, Any]:
         "attempts": row.attempts,
         "error": row.error,
         "sent_at": _iso(row.sent_at),
+    }
+
+
+def story_dict(row: Story, *, heat: float | None = None, participants: int | None = None) -> dict[str, Any]:
+    """事件（一件事）。热度与参与者数由调用方从 `result.hot` 算出后传入。"""
+    return {
+        "id": row.id,
+        "title": row.title,
+        "digest": row.digest or "",
+        "first_seen_at": _iso(row.first_seen_at),
+        "last_seen_at": _iso(row.last_seen_at),
+        "locked": bool(row.locked),
+        "heat": heat,
+        "participants": participants,
+    }
+
+
+def report_item_dict(report: ReportItem, item: NewsItem, score: StoryScore | None = None) -> dict[str, Any]:
+    """事件页里的一条报道。
+
+    `role` 直接给前端：读者要能一眼看出哪条是一手、哪条是后续进展、哪条只是重复报道——
+    这三者对"这件事现在到哪一步了"的含义完全不同。
+    """
+    return {
+        "news_item_id": item.id,
+        "title": item.title,
+        "url": item.url,
+        "source": item.source,
+        "published_at": _iso(item.published_at),
+        "participant": report.participant,
+        "tier": report.tier,
+        "role": report.role,
+        "editorial": bool(report.editorial),
+        "observed_at": _iso(report.observed_at),
+        "score": None if score is None else (score.score1 + score.score2) / 2,
+        "selected": None if score is None else bool(score.selected),
     }

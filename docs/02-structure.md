@@ -71,6 +71,7 @@ news_bot/
 │           ├── tasks.py
 │           ├── schedules.py
 │           ├── news.py
+│           ├── events.py          # 事件列表 / 事件详情 / 热度榜 / 日报编排
 │           └── system.py
 ├── web/                         # 管理界面
 │   ├── package.json / vite.config.ts / tsconfig.json / eslint.config.js
@@ -78,6 +79,8 @@ news_bot/
 │       ├── main.ts / App.vue / router.ts / styles.css
 │       ├── api/                 # 唯一允许发 HTTP 请求的目录（client.ts、format.ts）
 │       ├── views/               # 页面，一页一个文件
+│       │                        # 事件层：DigestView（当日精选）/ HotView（热度榜）/
+│       │                        #         EventsView（事件列表）/ EventDetailView（事件详情）
 │       └── components/          # 复用组件
 ├── tests/
 │   ├── conftest.py

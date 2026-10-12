@@ -7,6 +7,10 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { api } from './api/client'
 
 import DashboardView from './views/DashboardView.vue'
+import DigestView from './views/DigestView.vue'
+import HotView from './views/HotView.vue'
+import EventsView from './views/EventsView.vue'
+import EventDetailView from './views/EventDetailView.vue'
 import TasksView from './views/TasksView.vue'
 import SchedulesView from './views/SchedulesView.vue'
 import NewsView from './views/NewsView.vue'
@@ -17,6 +21,9 @@ import LoginView from './views/LoginView.vue'
 /** 导航表：侧边与顶栏都按它渲染，新增页面只改这里。 */
 export const NAV = [
   { name: 'dashboard', path: '/', label: '总览' },
+  { name: 'digest', path: '/digest', label: '当日精选' },
+  { name: 'hot', path: '/hot', label: '热度榜' },
+  { name: 'events', path: '/events', label: '事件' },
   { name: 'tasks', path: '/tasks', label: '任务' },
   { name: 'schedules', path: '/schedules', label: '定时推送' },
   { name: 'news', path: '/news', label: '资讯库' },
@@ -29,6 +36,10 @@ export const router = createRouter({
   routes: [
     { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
     { path: '/', name: 'dashboard', component: DashboardView },
+    { path: '/digest', name: 'digest', component: DigestView },
+    { path: '/hot', name: 'hot', component: HotView },
+    { path: '/events', name: 'events', component: EventsView },
+    { path: '/events/:id', name: 'event', component: EventDetailView },
     { path: '/tasks', name: 'tasks', component: TasksView },
     { path: '/schedules', name: 'schedules', component: SchedulesView },
     { path: '/news', name: 'news', component: NewsView },

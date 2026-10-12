@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from newsbot.api.deps import Services
-from newsbot.api.routes import news, schedules, system, tasks
+from newsbot.api.routes import events, news, schedules, system, tasks
 from newsbot.api.security import COOKIE_CSRF, COOKIE_SESSION, Sessions, check_password
 from newsbot.app import App, build_app
 from newsbot.core.config import Config, get_config
@@ -128,6 +128,7 @@ def create_app(config: Config, runtime: App | None = None) -> FastAPI:
     api.include_router(tasks.router, prefix="/api")
     api.include_router(schedules.router, prefix="/api")
     api.include_router(news.router, prefix="/api")
+    api.include_router(events.router, prefix="/api")
     api.include_router(system.router, prefix="/api")
 
     # ── 前端托管 ──

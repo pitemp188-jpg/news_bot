@@ -48,6 +48,71 @@ export function platformName(platform: string | null | undefined): string {
   return PLATFORM_NAMES[platform] ?? platform
 }
 
+const ROLE_TEXT: Record<string, string> = {
+  primary: '一手报道',
+  follow_up: '后续进展',
+  duplicate: '重复报道',
+}
+
+/** 报道角色的中文名。三者对"这件事到哪一步了"的含义完全不同，必须分开显示。 */
+export function roleText(role: string): string {
+  return ROLE_TEXT[role] ?? role
+}
+
+/** 报道角色对应的徽标配色：一手最重、后续次之、重复最轻。 */
+export function roleTone(role: string): string {
+  if (role === 'primary') return 'ok'
+  if (role === 'follow_up') return 'info'
+  return ''
+}
+
+const TIER_TEXT: Record<string, string> = {
+  T1: '官方一手',
+  T1_5: '官方账号',
+  T2: '媒体',
+}
+
+export function tierText(tier: string): string {
+  return TIER_TEXT[tier] ?? tier
+}
+
+const TREND_TEXT: Record<string, string> = {
+  up: '升温',
+  down: '降温',
+  flat: '持平',
+  new: '新事件',
+}
+
+export function trendText(trend: string): string {
+  return TREND_TEXT[trend] ?? '—'
+}
+
+const BADGE_TEXT: Record<string, string> = {
+  surge: '骤增',
+  rising: '上升',
+  new: '新出现',
+}
+
+export function badgeText(badge: string): string {
+  return BADGE_TEXT[badge] ?? badge
+}
+
+/** 热度刻度：算法给的是热度的 10 倍一位小数，直接显示原始值全是小数看不出差别。 */
+export function heatIndex(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—'
+  return value.toFixed(1)
+}
+
+const PERIOD_TEXT: Record<string, string> = {
+  daily: '日报',
+  weekly: '周报',
+  monthly: '月报',
+}
+
+export function periodText(period: string): string {
+  return PERIOD_TEXT[period] ?? period
+}
+
 /** ISO 时间转本地展示；只显示到今天则省略日期。 */
 export function formatTime(value: string | null | undefined, withDate = false): string {
   if (!value) return '—'
