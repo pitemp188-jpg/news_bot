@@ -110,6 +110,7 @@ class Pipeline:
         sessions: SessionStore,
         deduper: DeduperFactory | None = None,
         remember: bool = True,
+        timezone: str = board.DEFAULT_TIMEZONE,
     ) -> None:
         self._db = db
         self._runner = runner
@@ -118,6 +119,8 @@ class Pipeline:
         self._sessions = sessions
         self._deduper = deduper
         self._remember = remember
+        # 事件层呈现的表头时刻要按这个时区渲染，不能按宿主时区（见 result.digest._local）
+        self._timezone = timezone
 
     async def execute(self, session: AsyncSession, task: Task) -> str | None:
         """执行任务；投递失败按可重试处理，其余错误向上抛给队列分类。
@@ -128,7 +131,7 @@ class Pipeline:
         引用过的编号。它们也不需要历史去重与用量落库（零模型调用）。
         """
         if task.kind in board.BOARD_KINDS:
-            content = await board.render(self._db, task.kind)
+            content = await board.render(self._db, task.kind, timezone=self._timezone)
             report = Report(task_id=task.id, content=content, sources=[])
             session.add(report)
             await session.commit()

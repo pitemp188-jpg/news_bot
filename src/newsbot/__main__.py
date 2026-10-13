@@ -253,7 +253,9 @@ async def _digest(period: str, limit: int | None) -> int:
     db = Database(config.db_url)
     try:
         await db.prepare()
-        built = await digest_mod.assemble(db, period=period, limit=limit or digest_mod.DEFAULT_LIMIT)
+        built = await digest_mod.assemble(
+            db, period=period, limit=limit or digest_mod.DEFAULT_LIMIT, timezone=config.app.timezone
+        )
     finally:
         await db.dispose()
     print(built.render())

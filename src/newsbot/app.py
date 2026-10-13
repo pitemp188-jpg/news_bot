@@ -117,6 +117,7 @@ class App:
             sender=router,
             sessions=sessions,
             deduper=self._make_deduper,
+            timezone=config.app.timezone,
         )
         queue = self.queue = TaskQueue(db, config.queue, pipeline.execute)
         await queue.start()

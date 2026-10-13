@@ -130,7 +130,7 @@ async def get_digest(
     limit: int = Query(digest_mod.DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
 ) -> dict[str, Any]:
     """日报/周报/月报。编排是纯规则，所以这个接口可以随便刷新、结果稳定。"""
-    built = await digest_mod.assemble(services.db, period=period, limit=limit)
+    built = await digest_mod.assemble(services.db, period=period, limit=limit, timezone=services.config.app.timezone)
     return {
         "period": built.period,
         "title": built.title,

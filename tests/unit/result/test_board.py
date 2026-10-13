@@ -246,3 +246,39 @@ def test_board_topics_only_map_to_known_kinds() -> None:
     assert set(board.BOARD_TOPICS.values()) <= board.BOARD_KINDS
     assert board.BOARD_TOPICS["热榜"] == "hot"
     assert board.BOARD_TOPICS["日报"] == "digest"
+
+
+# ── 展示时区 ──
+
+
+async def test_hot_text_renders_the_header_in_the_display_timezone(tmp_path: Any) -> None:
+    """表头时刻按**展示时区**渲染。
+
+    回归用例：`moment` 默认取 UTC 当下，若直接格式化，UTC+8 的用户会看到早 8 小时的
+    时间，跨日时连日期都对不上（同类缺陷见 T11.10 的 `astimezone()`）。断言用
+    「相差 8 小时的同一时刻在 UTC 与 Asia/Shanghai 下渲染出不同文本」来表达，
+    不写死具体字符串，免得换个固定时刻就要改用例。
+    """
+    db = await _make_db(tmp_path)
+    try:
+        story_id = await _seed(db, title="两家都报的这件事", url="https://a.example/1", source="a.com")
+        await _join(db, story_id, title="另一家也报了", url="https://b.example/1", source="b.com")
+        utc_text = await board.hot_text(db, now=NOW, timezone="UTC")
+        local_text = await board.hot_text(db, now=NOW, timezone="Asia/Shanghai")
+        assert "热度榜 · 10-13 12:00" in utc_text
+        assert "热度榜 · 10-13 20:00" in local_text
+        assert utc_text != local_text
+    finally:
+        await db.dispose()
+
+
+async def test_digest_text_renders_the_date_in_the_display_timezone(tmp_path: Any) -> None:
+    """日报标题上的日期同样按展示时区——UTC 的 23:30 在上海已经是第二天。"""
+    db = await _make_db(tmp_path)
+    try:
+        await _seed(db, title="某公司发布芯片", url="https://a.example/1", source="a.com")
+        late = datetime(2026, 10, 13, 23, 30, tzinfo=UTC)
+        assert "2026-10-13 日报" in await board.digest_text(db, now=late, timezone="UTC")
+        assert "2026-10-14 日报" in await board.digest_text(db, now=late, timezone="Asia/Shanghai")
+    finally:
+        await db.dispose()

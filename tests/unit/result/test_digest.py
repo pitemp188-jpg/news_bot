@@ -72,6 +72,37 @@ def test_entry_line_does_not_call_the_model() -> None:
     assert "另一家标题" in entry.line()
 
 
+def test_entry_line_never_echoes_the_title_it_was_built_from() -> None:
+    """没有综述时不能把事件标题的**来源标题**再列一遍。
+
+    回归用例（真实数据上抓到）：事件标题被模型改成中文短句后，`titles[0]` 仍是外文
+    原标题，而回退逻辑当时用的是「归一化后是否等于事件标题」——判据因此失效，日报里
+    出现「中文标题」+「英文原标题」两行同义内容，**单来源事件也凭空多出一行**。
+    """
+    entry = dg.Entry(
+        story_id=1,
+        title="谷歌云推持久Gemini代理",
+        titles=["Google Cloud unveils persistent Gemini Agents for long-running tasks"],
+        participants=1,
+    )
+    text = entry.line()
+    assert "Google Cloud unveils" not in text, "单来源事件没有别的说法，不该有正文行"
+    assert "\n" not in text, "只有标题一行，没有正文行（这条也没有网址）"
+
+
+def test_entry_line_still_lists_the_other_sources() -> None:
+    """多来源事件且模型没写成综述时，别家的标题仍要列出来（回退的价值所在）。"""
+    entry = dg.Entry(
+        story_id=1,
+        title="两家都报了这件事",
+        titles=["First report in English", "Second report in English", "Third report"],
+        participants=3,
+    )
+    text = entry.line()
+    assert "Second report in English" in text
+    assert "First report in English" not in text, "第一条就是标题来源，列出来是重复"
+
+
 def test_within_period_uses_last_seen() -> None:
     """上周开始、今天有进展的事件属于今天；按首次出现筛会让它永远不再出现。"""
     story = Story(title="x", first_seen_at=NOW - timedelta(days=9), last_seen_at=NOW - timedelta(hours=2))
