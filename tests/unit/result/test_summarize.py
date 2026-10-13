@@ -106,6 +106,22 @@ def test_parse_digest_rejects_empty_or_tiny() -> None:
     assert sm.parse_digest("嗯。") == ""
 
 
+def test_parse_title_reads_the_line_and_validates_length() -> None:
+    """标题取自「标题：…」那一行，并且要过长度校验。
+
+    取不到要返回空串而不是编一个：调用方会保留原标题，而用原标题兜底会让"模型没写"
+    被伪装成"模型写的标题就是原标题"。
+    """
+    assert sm.parse_title("标题：Cloudflare 收购 Deno 项目\n综述：某某某") == "Cloudflare 收购 Deno 项目"
+    assert sm.parse_title("**标题**：星号包裹也要认\n综述：某某某") == "星号包裹也要认"
+    assert sm.parse_title("标题：「引号包裹的标题」") == "引号包裹的标题"
+    assert sm.parse_title("综述：只有综述没有标题") == ""
+    assert sm.parse_title("") == ""
+    # 太短（没写出来）与太长（没遵守上限）都判为不可用
+    assert sm.parse_title("标题：短") == ""
+    assert sm.parse_title("标题：" + "很长的标题" * 20) == ""
+
+
 # ── 素材挑选 ──
 
 
@@ -158,7 +174,8 @@ def test_prompt_carries_title_materials_and_tail_requirement() -> None:
     assert "某公司发布芯片" in user
     assert "甲来源这样报" in user
     assert "a.com" in user
-    assert user.rstrip().endswith("请写出这个事件的综述。"), "格式要求必须在最后"
+    assert user.rstrip().endswith("请按格式输出这个事件的标题与综述。"), "格式要求必须在最后"
+    assert "标题：" in prompt[0]["content"], "标题与综述由同一次调用产出，不额外花钱"
     assert "不要推测" in prompt[0]["content"] or "不要补充背景知识" in prompt[0]["content"]
 
 
@@ -170,17 +187,18 @@ def test_prompt_truncates_long_body() -> None:
 # ── 该不该写 ──
 
 
-async def test_pending_skips_single_source_stories(tmp_path: Any) -> None:
-    """独家事件不写综述：它唯一那条报道就是全部内容，标题已经把事说清楚了。
+async def test_pending_marks_single_source_as_title_only(tmp_path: Any) -> None:
+    """独家事件**只改标题、不写正文**。
 
-    实测这类条目的"综述"就是把标题重复一遍——纯噪声，还白付一次模型调用。
+    它唯一那条报道就是全部内容，写"综述"只会把标题重复一遍——纯噪声。但标题仍要改：
+    原标题常是英文长句（实测有一条 200 字符），在聊天里折成一片。
     """
     db = await _make_db(tmp_path)
     try:
         await _seed(db, title="只有一家报的事", url="https://a.example/1")
         pending = await sm.Summarizer(FakeLLM()).pending(db)
-        assert pending.items == []
-        assert pending.single == 1, "跳过原因要如实记下来，否则日志会打成「跳过 0」"
+        assert len(pending.items) == 1
+        assert pending.items[0].with_digest is False, "单来源不该要正文"
     finally:
         await db.dispose()
 
@@ -192,10 +210,11 @@ async def test_pending_includes_multi_source_without_digest(tmp_path: Any) -> No
         await _seed(db, title="两家都报的事（另一家）", url="https://b.example/1", source="b.com", story_id=story_id)
         pending = await sm.Summarizer(FakeLLM()).pending(db)
         assert len(pending.items) == 1
-        story, records, covered = pending.items[0]
-        assert story.id == story_id
-        assert len(records) == 2
-        assert covered == 0
+        target = pending.items[0]
+        assert target.story.id == story_id
+        assert len(target.records) == 2
+        assert target.covered == 0
+        assert target.with_digest is True, "多来源才要正文综述"
     finally:
         await db.dispose()
 
@@ -238,8 +257,8 @@ async def test_pending_rewrites_when_new_reports_arrive(tmp_path: Any) -> None:
         await _seed(db, title="第三家也来了", url="https://c.example/1", source="c.com", story_id=story_id)
 
         pending = await sm.Summarizer(FakeLLM()).pending(db)
-        assert len(pending.items) == 1, "出现了第 3 条报道，综述应判为过期"
-        assert pending.items[0][2] == 2, "要告诉调用方上次只覆盖了 2 条"
+        assert len(pending.items) == 1, "出现了第 3 条报道，应判为过期"
+        assert pending.items[0].covered == 2, "要告诉调用方上次只覆盖了 2 条"
     finally:
         await db.dispose()
 
@@ -274,7 +293,7 @@ async def test_pending_limit_keeps_the_biggest_gap(tmp_path: Any) -> None:
 
         pending = await sm.Summarizer(FakeLLM()).pending(db, limit=1)
         assert len(pending.items) == 1
-        assert pending.items[0][0].id == big, "缺口最大的那个事件要先写"
+        assert pending.items[0].story.id == big, "缺口最大的那个事件要先写"
     finally:
         await db.dispose()
 
@@ -287,16 +306,20 @@ async def test_refresh_writes_digest_and_marks_coverage(tmp_path: Any) -> None:
     try:
         story_id, _ = await _seed(db, title="两家都报的事", url="https://a.example/1", source="a.com")
         await _seed(db, title="另一家的说法", url="https://b.example/1", source="b.com", story_id=story_id)
-        llm = FakeLLM(replies=[reply("某公司发布新一代推理芯片，性能提升三成，已开始出货")])
+        llm = FakeLLM(
+            replies=[reply("标题：某公司发布新一代推理芯片\n综述：某公司发布新一代推理芯片，性能提升三成，已开始出货")]
+        )
         result = await sm.Summarizer.from_config(llm, EditorialSection()).refresh(db)
-        assert result.written == 1
+        assert result.written == 1 and result.title_only == 0
         assert result.failed == 0
         assert len(result.usage) == 1, "用量要记下来，便于接进成本统计"
         async with db.session() as session:
             story = await session.get(Story, story_id)
         assert story is not None
         assert story.digest == "某公司发布新一代推理芯片，性能提升三成，已开始出货"
+        assert story.title == "某公司发布新一代推理芯片", "标题也要用模型给的短句覆盖原标题"
         assert story.digest_reports == 2, "要把覆盖的条数记下来，否则过期判定无从下手"
+        assert result.retitled == 1
     finally:
         await db.dispose()
 
@@ -331,13 +354,15 @@ async def test_refresh_survives_one_failure(tmp_path: Any) -> None:
         second, _ = await _seed(db, title="乙事件", url="https://c.example/1", source="c.com")
         await _seed(db, title="乙事件另一家", url="https://d.example/1", source="d.com", story_id=second)
 
-        llm = FakeLLM(replies=[RuntimeError("模型挂了"), reply("乙事件的综述写得很好")])
+        # 第一条崩；第二条只给标题（多来源事件要标题+正文，但缺正文算失败）
+        llm = FakeLLM(replies=[RuntimeError("模型挂了"), reply("标题：乙事件的中文标题")])
         result = await sm.Summarizer(llm).refresh(db)
-        assert result.written == 1 and result.failed == 1
+        assert result.failed == 2, "一个崩了、一个缺正文，都算失败"
+        assert result.written == 0
         async with db.session() as session:
             rows = (await session.scalars(select(Story).order_by(Story.id))).all()
-        assert rows[0].digest is None
-        assert rows[1].digest == "乙事件的综述写得很好"
+        assert rows[0].title == "甲事件", "失败的事件标题不变"
+        assert rows[1].title == "乙事件", "缺正文时不能写入标题（整条都算失败）"
     finally:
         await db.dispose()
 
@@ -348,7 +373,7 @@ async def test_refresh_uses_configured_limits(tmp_path: Any) -> None:
         story_id, _ = await _seed(db, title="两家都报的事", url="https://a.example/1", source="a.com")
         await _seed(db, title="另一家", url="https://b.example/1", source="b.com", story_id=story_id)
         config = EditorialSection(summary_max_tokens=1234, summary_timeout_seconds=7.5)
-        llm = FakeLLM(replies=[reply("一段写得挺好的事件综述")])
+        llm = FakeLLM(replies=[reply("综述：一段写得挺好的事件综述")])
         await sm.Summarizer.from_config(llm, config).refresh(db)
         assert llm.max_tokens_seen == [1234], "输出上限要从配置取"
     finally:
@@ -359,11 +384,11 @@ async def test_save_digest_tolerates_missing_story(tmp_path: Any) -> None:
     """并发下事件可能刚被 `--reset` 清掉，此时不能抛异常。"""
     db = await _make_db(tmp_path)
     try:
-        await sm.save_digest(db, 99999, "某件事的综述", 2)  # 不抛就算过
+        await sm.save_digest(db, 99999, "某件事的标题", "某件事的综述", 2)  # 不抛就算过
     finally:
         await db.dispose()
 
 
 def test_result_line_mentions_every_counter() -> None:
-    result = sm.SummaryResult(written=3, skipped_fresh=5, skipped_single=40, failed=1)
-    assert all(part in result.line() for part in ("3", "5", "40", "1"))
+    result = sm.SummaryResult(written=3, retitled=5, title_only=2, skipped_fresh=40, failed=1)
+    assert all(part in result.line() for part in ("3", "5", "2", "40", "1"))

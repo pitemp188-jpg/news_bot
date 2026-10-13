@@ -30,6 +30,13 @@ class RefreshStats:
     stories: int = 0
     assigned: int = 0
     summarized: int = 0
+    # 顺带改了标题的事件数。标题由模型写成中文短句，此前它是第一条报道的**原标题**
+    # （英文媒体动辄一两百字符），在聊天里会折成一片
+    retitled: int = 0
+    # 只改标题、不写综述的事件数（单来源事件）。它与 `summarized` 相加才是这次
+    # 真正处理的事件数——`retitled` 只反映"标题变了没"，跑顺了以后大多是 0，
+    # 拿它当工作量会看不出做过事
+    title_only: int = 0
     scored: int = 0
     selected: int = 0
     unstable: int = 0
@@ -40,7 +47,8 @@ class RefreshStats:
     def line(self) -> str:
         return (
             f"候选 {self.loaded} 条 → 归组 {self.clustered} 条 / 新建事件 {self.stories} 个"
-            f"（写入归属 {self.assigned} 条）→ 综述 {self.summarized} 条 → "
+            f"（写入归属 {self.assigned} 条）→ 改写标题 {self.retitled} 条"
+            f"（带综述 {self.summarized} 条、只改标题 {self.title_only} 条）→ "
             f"打分 {self.scored} 条（入选 {self.selected}，"
             f"待复核 {self.unstable}）→ 热度快照 {self.snapshots} 条"
         )
@@ -173,6 +181,8 @@ async def _summarize(
         logger.warning("事件综述失败: %s: %s", type(exc).__name__, exc)
         return
     stats.summarized = result.written
+    stats.retitled = result.retitled
+    stats.title_only = result.title_only
     stats.usage.extend(result.usage)
 
 

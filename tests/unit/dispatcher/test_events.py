@@ -31,11 +31,15 @@ class RoutingLLM(FakeLLM):
         self,
         *,
         summary: str = "两家都报了这件事，官方称性能提升三成",
+        title: str = "两家都报了这件事",
         pairs: str = "1,2,same",
+        score: str = "8",
     ) -> None:
         super().__init__()
         self.summary = summary
+        self.title = title
         self.pairs = pairs
+        self.score = score
         self.kinds: list[str] = []
 
     async def complete(self, messages: Any, tools: Any = None, *, max_tokens: Any = None) -> Any:
@@ -43,16 +47,22 @@ class RoutingLLM(FakeLLM):
         self.calls.append(messages)
         if max_tokens is not None:
             self.max_tokens_seen.append(max_tokens)
-        if "综述" in prompt:
-            self.kinds.append("summary")
-            return reply(self.summary)
+        # 打分：prompt 里唯一稳定的特征就是那句主编设定（0～10 一个整数）
+        if "值不值得进当天的日报" in prompt:
+            self.kinds.append("score")
+            return reply(self.score)
+        if "原标题" in prompt:
+            # 标题与综述是同一次调用：多来源事件要两行，单来源事件只要标题行
+            if "综述" in prompt:
+                self.kinds.append("summary")
+                return reply(f"标题：{self.title}\n综述：{self.summary}")
+            self.kinds.append("title")
+            return reply(f"标题：{self.title}")
         # 配对判定：给出"前两条是同一件事"的结论。缺了它就不会归组，
         # 也就不会出现多来源事件，用例会以"没调用综述"这种间接方式失败
         if "两两配对" in prompt:
             self.kinds.append("cluster")
             return reply(self.pairs)
-        self.kinds.append("other")
-        return reply("")
         self.kinds.append("other")
         return reply("")
 
@@ -226,8 +236,8 @@ async def test_refresh_clusters_then_scores(tmp_path: Any) -> None:
     await db.prepare()
     await _seed(db, title="某公司发布新一代推理芯片", url="https://a.example/1", assigned=False)
     # 打分的两次调用各回一个分数（只有一条未归组，聚簇不需要调用模型）
-    llm = FakeLLM(replies=[reply("9"), reply("8")])
-    stats = await ev.refresh(db, llm, now=NOW)
+    llm = RoutingLLM()
+    stats = await ev.refresh(db, llm, now=NOW, do_summarize=False)
     assert stats.loaded == 1
     assert stats.stories == 1, "未归组的资讯要新建事件"
     assert stats.scored == 1
@@ -301,16 +311,19 @@ async def test_refresh_snapshots_at_the_current_moment(tmp_path: Any) -> None:
 
 
 async def test_refresh_does_not_rescore(tmp_path: Any) -> None:
-    """打分是两次模型调用；内容没变就不该重打。"""
+    """打分是两次模型调用；内容没变就不该重打。
+
+    注意"没有新报道"与"没有模型调用"是两件事：标题/综述的过期判定走 `digest_reports`，
+    与打分走 `story_score` 是两套独立的判据。所以这里断言的是 `scored == 0`，而不是
+    模型调用为零。
+    """
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'refresh3.db'}")
     await db.prepare()
     await _seed(db, title="某公司发布新一代推理芯片", url="https://a.example/1", assigned=False)
-    await ev.refresh(db, FakeLLM(replies=[reply("9"), reply("9")]), now=NOW)
-    llm = FakeLLM()
-    stats = await ev.refresh(db, llm, now=NOW)
+    await ev.refresh(db, RoutingLLM(), now=NOW, do_summarize=False)
+    stats = await ev.refresh(db, RoutingLLM(), now=NOW, do_summarize=False)
     assert stats.loaded == 0, "已经归组过了，没有新候选"
-    assert stats.scored == 0
-    assert llm.calls == []
+    assert stats.scored == 0, "内容没变就不该重打分"
     await db.dispose()
 
 
@@ -351,7 +364,9 @@ async def test_refresh_summarizes_multi_source_stories(tmp_path: Any) -> None:
     stats = await ev.refresh(db, llm, editorial=EditorialSection(), now=NOW, do_select=False, do_snapshot=False)
     assert "summary" in llm.kinds, "综述步骤应真的被调用过"
     assert stats.summarized == 1, "只该给那件多来源的事写综述"
-    assert "综述 1 条" in stats.line()
+    # 独家那件也要标题（原来直接沿用报道原标题），但它不该有正文综述
+    assert stats.title_only == 1, "独家事件走「只改标题」，不该写综述"
+    assert "带综述 1 条、只改标题 1 条" in stats.line()
     async with db.session() as session:
         rows = (await session.scalars(select(Story).order_by(Story.id))).all()
     written = [story for story in rows if story.digest]

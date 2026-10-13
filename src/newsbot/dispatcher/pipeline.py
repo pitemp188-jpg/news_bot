@@ -20,6 +20,7 @@ from newsbot.core.log import get_logger
 from newsbot.core.models import LlmUsage, NewsItem, Report, Task
 from newsbot.core.quality import is_listing
 from newsbot.dispatcher.session import SessionStore
+from newsbot.result import board
 from newsbot.result.dedup import Deduper, Item, content_digest, simhash64, simhash_hex, url_digest
 
 logger = get_logger(__name__)
@@ -119,7 +120,24 @@ class Pipeline:
         self._remember = remember
 
     async def execute(self, session: AsyncSession, task: Task) -> str | None:
-        """执行任务；投递失败按可重试处理，其余错误向上抛给队列分类。"""
+        """执行任务；投递失败按可重试处理，其余错误向上抛给队列分类。
+
+        `kind` 属于事件层呈现类型（`board.BOARD_KINDS`）时**完全不走 Agent**：那类
+        任务要的是"我们**已经**追踪到的事件的榜单"，而不是再去现搜一遍。走 Agent
+        会重新引入事件层本来要解决的问题——查询时间不对、来源重复、去重还会删掉正文
+        引用过的编号。它们也不需要历史去重与用量落库（零模型调用）。
+        """
+        if task.kind in board.BOARD_KINDS:
+            content = await board.render(self._db, task.kind)
+            report = Report(task_id=task.id, content=content, sources=[])
+            session.add(report)
+            await session.commit()
+            if task.platform and task.chat_id:
+                await self._deliver(task, content, report.id)
+            else:
+                logger.info("任务 #%d 无投递目标，仅生成报告", task.id)
+            return content
+
         history = await self._history(task)
         findings = await self._runner.run(task.query, history)
         # 去重放在用量落库之前：语义分组会产生一次模型调用，它的用量也要进 llm_usage

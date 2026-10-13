@@ -45,6 +45,20 @@ def _schedule_jobs(app: App) -> set[str]:
     return app.scheduler.job_ids() - {REFRESH_JOB_ID}
 
 
+async def _schedule_with(app: App, topic: str) -> Schedule:
+    """取出主题包含 `topic` 的订阅。
+
+    不能取 `scalar_one()`：第一条消息会自动建一条默认订阅（AI），所以库里不止一条。
+    `topics` 是 JSON 列，在 SQL 里比不出"包含"，在 Python 里筛更直接。
+    """
+    assert app.db is not None
+    async with app.db.session() as session:
+        rows = list((await session.execute(select(Schedule))).scalars())
+    matched = [row for row in rows if topic in (row.topics or [])]
+    assert len(matched) == 1, f"应恰好有一条包含「{topic}」的订阅，实际 {len(matched)} 条"
+    return matched[0]
+
+
 async def _drain(app: App, timeout: float = 5.0) -> None:
     import asyncio
 
@@ -137,6 +151,44 @@ async def test_scheduled_job_submits_and_delivers(tmp_path: Path) -> None:
         await app.scheduler.run_job(row.id)
         await _drain(app)
         assert any("结果 [1]" in text for _chat, text, _reply in adapter.sent)
+    finally:
+        await app.stop()
+
+
+async def test_scheduled_board_topic_bypasses_search(tmp_path: Path) -> None:
+    """订阅主题写成「热榜」时提交的是事件层任务，不走 Agent 检索。
+
+    事件层已经把"同一件事被多少家独立来源报道过"算出来了，交给 Agent 重搜一遍等于
+    把归组、独立来源计数、事件综述整个丢掉重做。
+    """
+    app, adapter = await _app(tmp_path)
+    try:
+        await adapter.emit("/订阅 热榜 21:00", chat_id="u1", user_id="u1")
+        assert app.db is not None and app.scheduler is not None
+        row = await _schedule_with(app, "热榜")
+        assert row.topics == ["热榜"]
+
+        await app.scheduler.run_job(row.id)
+        async with app.db.session() as session:
+            tasks = list((await session.execute(select(Task))).scalars())
+        assert [task.kind for task in tasks] == ["hot"], "应提交事件层任务"
+        assert "汇总" not in str(tasks[0].query), "不该拼成检索问句"
+    finally:
+        await app.stop()
+
+
+async def test_scheduled_mixed_topics_still_search(tmp_path: Path) -> None:
+    """多主题混写（「AI,热榜」）意图不明，按检索处理，保持原有行为。"""
+    app, adapter = await _app(tmp_path)
+    try:
+        await adapter.emit("/订阅 AI,热榜 21:00", chat_id="u1", user_id="u1")
+        assert app.db is not None and app.scheduler is not None
+        row = await _schedule_with(app, "热榜")
+        await app.scheduler.run_job(row.id)
+        async with app.db.session() as session:
+            tasks = list((await session.execute(select(Task))).scalars())
+        assert [task.kind for task in tasks] == ["scheduled"]
+        assert "汇总" in str(tasks[0].query)
     finally:
         await app.stop()
 

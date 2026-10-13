@@ -517,3 +517,48 @@ async def test_uncited_duplicate_is_still_merged(tmp_path: Path) -> None:
         assert [item["label"] for item in findings.sources] == ["S32"]
     finally:
         await db.dispose()
+
+
+async def test_board_task_skips_the_agent(tmp_path: Path) -> None:
+    """`kind=hot` / `kind=digest` 的任务完全不经过 Agent。
+
+    那类任务要的是"我们**已经**追踪到的事件的榜单"，不是再去现搜一遍：走 Agent 会
+    重新引入事件层本来要解决的问题（查询时间不对、来源重复、去重删掉引用编号），
+    而且白花一次模型调用。
+    """
+    db = await _make_db(tmp_path)
+    try:
+        runner, reporter, sender = FakeRunner(), FakeReporter(), FakeSender()
+        pipeline = Pipeline(db, runner=runner, reporter=reporter, sender=sender, sessions=SessionStore(db))
+        task_id = await _make_task(db, kind="hot", query="热度榜")
+
+        async with db.session() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            content = await pipeline.execute(session, task)
+
+        assert runner.calls == [], "事件层任务不该调用 Agent"
+        assert reporter.seen == [], "也不该经过成稿器"
+        assert content is not None and "热度榜" in content
+        assert sender.sent and "热度榜" in sender.sent[0][2]
+        async with db.session() as session:
+            report = (await session.execute(select(Report))).scalar_one()
+        assert report.task_id == task_id
+    finally:
+        await db.dispose()
+
+
+async def test_board_task_is_delivered_with_its_report_id(tmp_path: Path) -> None:
+    """投递要带 report_id，后台的推送记录才关联得上。"""
+    db = await _make_db(tmp_path)
+    try:
+        runner, reporter, sender = FakeRunner(), FakeReporter(), FakeSender()
+        pipeline = Pipeline(db, runner=runner, reporter=reporter, sender=sender, sessions=SessionStore(db))
+        task_id = await _make_task(db, kind="digest", query="今日精选")
+        async with db.session() as session:
+            task = await session.get(Task, task_id)
+            assert task is not None
+            await pipeline.execute(session, task)
+        assert sender.report_ids and sender.report_ids[0] is not None
+    finally:
+        await db.dispose()

@@ -90,6 +90,34 @@ async def test_search_command_requires_argument(harness: Harness) -> None:
     assert [task.query for task in tasks] == ["芯片 出口管制"]
 
 
+async def test_board_commands_submit_event_layer_tasks(harness: Harness) -> None:
+    """`/热榜` 与 `/日报` 提交的是事件层任务（kind=hot/digest），不是搜索任务。
+
+    这两个读的应该是**我们自己追踪出来的事件**：事件层已经把同一件事的多家报道归成
+    一个事件、按独立来源算了热度、给多来源事件写了综述。让 Agent 再搜一遍等于把这
+    份工作丢掉重做，而且会重新引入"查询时间不对、来源重复、去重删掉引用编号"这些问题。
+    """
+    assert "正在生成热度榜" in (await harness.send("/热榜") or "")
+    assert "正在生成今日精选" in (await harness.send("/日报") or "")
+    tasks = await harness.tasks()
+    assert [task.kind for task in tasks] == ["hot", "digest"]
+    assert [task.query for task in tasks] == ["热度榜", "今日精选"]
+
+
+async def test_board_commands_accept_aliases(harness: Harness) -> None:
+    for text in ("/热度", "/热点"):
+        await harness.send(text)
+    for text in ("/精选",):
+        await harness.send(text)
+    tasks = await harness.tasks()
+    assert [task.kind for task in tasks] == ["hot", "hot", "digest"]
+
+
+async def test_help_mentions_board_commands(harness: Harness) -> None:
+    text = await harness.send("/帮助") or ""
+    assert "/热榜" in text and "/日报" in text
+
+
 async def test_subscribe_uses_default_and_explicit_time(harness: Harness) -> None:
     default = await harness.send("/订阅 半导体")
     assert default is not None and "每天 21:00" in default
