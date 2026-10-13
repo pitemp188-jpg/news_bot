@@ -85,7 +85,13 @@ class Entry:
         if self.follow_up_only:
             tail += " · 后续进展"
         tail += "）"
-        body = self.digest.strip() or "；".join(self.titles[:3])
+        # 正文优先用模型写的综述。没有综述时退回"把别的报道标题列出来"，但**要排除
+        # 与事件标题重复的那些**：实测 2 条报道的事件会写成「A；A 的中译」，而同一件事的
+        # 多份标题本来就是相似措辞——拼起来等于把标题重复一遍，正文里没有任何新信息。
+        # 剩下那些确实不同的标题才值得列（读者能看出别的来源是怎么说的）。
+        body = self.digest.strip() or "；".join(
+            title for title in self.titles[:3] if _normalized(title) != _normalized(self.title)
+        )
         text = f"- {head}{tail}"
         if body:
             text += f"\n  {body}"
@@ -266,3 +272,12 @@ def decorate(entries: list[Entry], ranking: list[hot.HotEntry]) -> None:
 def _as_utc(value: datetime) -> datetime:
     """SQLite 不保留时区，读回来是 naive；约定按 UTC 解释。"""
     return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _normalized(text: str) -> str:
+    """比对标题是否"同一句"时用的归一化：去掉空白与常见标点再比。
+
+    「Microsoft AI Releases Microsoft-Decision-1: A Qwen3.5-9B…」与去掉冒号空格后的
+    写法在读者眼里是同一句，逐字比对会当成两条不同的内容列出来。
+    """
+    return "".join(ch for ch in (text or "").lower() if ch.isalnum())

@@ -53,10 +53,11 @@ def _build_parser() -> argparse.ArgumentParser:
     digest.add_argument("--period", choices=["daily", "weekly", "monthly"], default="daily", help="周期，默认日报")
     digest.add_argument("--limit", type=int, help="最多列多少条事件，默认取 digest 的默认值")
 
-    events = sub.add_parser("events", help="刷新事件层：聚簇未归组资讯 → 两轮打分精选 → 热度快照")
+    events = sub.add_parser("events", help="刷新事件层：聚簇未归组资讯 → 多来源事件综述 → 两轮打分精选 → 热度快照")
     events.add_argument("--days", type=int, help="只看最近这么多天的资讯，默认取配置 cluster_days")
-    events.add_argument("--cluster-only", action="store_true", help="只做聚簇，不打分")
-    events.add_argument("--select-only", action="store_true", help="只打分，不聚簇")
+    events.add_argument("--cluster-only", action="store_true", help="只做聚簇，不写综述也不打分")
+    events.add_argument("--select-only", action="store_true", help="只打分，不聚簇也不写综述")
+    events.add_argument("--summary-only", action="store_true", help="只生成综述，不聚簇也不打分")
     events.add_argument(
         "--reset",
         action="store_true",
@@ -261,11 +262,11 @@ async def _digest(period: str, limit: int | None) -> int:
     return 0
 
 
-async def _events(days: int | None, *, cluster_only: bool, select_only: bool, reset: bool) -> int:
+async def _events(days: int | None, *, cluster_only: bool, select_only: bool, summary_only: bool, reset: bool) -> int:
     """刷新事件层并打印结果。
 
     与 `digest` 的区别：`digest` 只读已有事件（零模型调用、瞬时），`events` 会真的
-    调用模型做归组与打分——第一次跑或隔了很久没跑时才需要它。
+    调用模型做归组、写综述与打分——第一次跑或隔了很久没跑时才需要它。
     """
     from newsbot.core.llm import OpenAIClient
     from newsbot.dispatcher import events as events_mod
@@ -283,8 +284,11 @@ async def _events(days: int | None, *, cluster_only: bool, select_only: bool, re
             llm,
             editorial=config.editorial,
             days=days,
-            do_cluster=not select_only,
-            do_select=not cluster_only,
+            # 三个 --*-only 是互斥的用法，同时给多个等于"只做被点名的那几件"之外的事都不做；
+            # 实际使用中一次只给一个，这里不为它加额外的冲突校验（有 `stats.line()` 可核对）
+            do_cluster=not (select_only or summary_only),
+            do_select=not (cluster_only or summary_only),
+            do_summarize=not (cluster_only or select_only),
         )
     finally:
         await llm.aclose()
@@ -317,7 +321,13 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_digest(args.period, args.limit))
     if args.command == "events":
         return asyncio.run(
-            _events(args.days, cluster_only=args.cluster_only, select_only=args.select_only, reset=args.reset)
+            _events(
+                args.days,
+                cluster_only=args.cluster_only,
+                select_only=args.select_only,
+                summary_only=args.summary_only,
+                reset=args.reset,
+            )
         )
     if args.command == "api":
         from newsbot.api.server import serve_api

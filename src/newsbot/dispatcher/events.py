@@ -1,7 +1,7 @@
 """
 模块: dispatcher.events
-职责: 事件层刷新——聚簇未归组的资讯 → 两轮打分精选 → 落逐小时热度快照
-依赖: core.config, core.db, core.llm, core.log, result.cluster, result.hot, result.selection
+职责: 事件层刷新——聚簇未归组资讯 → 多来源事件综述 → 两轮打分精选 → 落逐小时热度快照
+依赖: core.config, core.db, core.llm, core.log, result.cluster, result.hot, result.selection, result.summarize
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from newsbot.core.db import Database
 from newsbot.core.llm import LLM, Usage
 from newsbot.core.log import get_logger
 from newsbot.core.models import HotSnapshot, NewsItem, ReportItem, Story, StoryScore
-from newsbot.result import cluster, hot, selection
+from newsbot.result import cluster, hot, selection, summarize
 
 logger = get_logger(__name__)
 
@@ -29,6 +29,7 @@ class RefreshStats:
     clustered: int = 0
     stories: int = 0
     assigned: int = 0
+    summarized: int = 0
     scored: int = 0
     selected: int = 0
     unstable: int = 0
@@ -39,7 +40,8 @@ class RefreshStats:
     def line(self) -> str:
         return (
             f"候选 {self.loaded} 条 → 归组 {self.clustered} 条 / 新建事件 {self.stories} 个"
-            f"（写入归属 {self.assigned} 条）→ 打分 {self.scored} 条（入选 {self.selected}，"
+            f"（写入归属 {self.assigned} 条）→ 综述 {self.summarized} 条 → "
+            f"打分 {self.scored} 条（入选 {self.selected}，"
             f"待复核 {self.unstable}）→ 热度快照 {self.snapshots} 条"
         )
 
@@ -79,14 +81,17 @@ async def refresh(
     do_cluster: bool = True,
     do_select: bool = True,
     do_snapshot: bool = True,
+    do_summarize: bool = True,
 ) -> RefreshStats:
     """把最近一段时间的资讯刷进事件层。
 
-    三步的顺序是有依赖的，不能换、也不能省中间那步：
+    四步的顺序是有依赖的，不能换、也不能省中间那步：
     1. **聚簇**：只有先归组，才有"同一件事被多少家独立来源报道过"这个量。
-    2. **精选**：打分按 (报道, 门槛) 存进 `story_score`，日报靠它排序。
+    2. **综述**：给多来源事件写一句话说明，日报与事件页复用。它只依赖第 1 步,
+       且与打分无关，所以放在打分之前——即使这一轮打分全部失败，日报仍有可读的正文。
+    3. **精选**：打分按 (报道, 门槛) 存进 `story_score`，日报靠它排序。
        它读的是**已归组的报道**，所以必须在聚簇之后。
-    3. **热度快照**：读的是 `report_item` 的参与者，同样依赖第 1 步。它取的是
+    4. **热度快照**：读的是 `report_item` 的参与者，同样依赖第 1 步。它取的是
        **当下**的时刻而不是本次刷新的起始时刻，原因见下方注释。
 
     每一步失败都**不阻断后面**（各自 try 住）：聚簇失败时精选仍可对旧事件打分，
@@ -100,6 +105,8 @@ async def refresh(
 
     if do_cluster:
         await _cluster(db, llm, config, window, moment, stats)
+    if do_summarize:
+        await _summarize(db, llm, config, stats)
     if do_select:
         await _select(db, llm, config, moment, stats)
     if do_snapshot:
@@ -145,6 +152,28 @@ async def _cluster(
     stats.stories = int(result.get("stories", 0))
     stats.assigned = int(result.get("items", 0))
     stats.skipped_locked = int(result.get("skipped_locked", 0))
+
+
+async def _summarize(
+    db: Database,
+    llm: LLM,
+    config: EditorialSection,
+    stats: RefreshStats,
+) -> None:
+    """给"该写或该重写"的多来源事件补综述。
+
+    为什么日报需要它：一个事件有多条报道时，日报的正文原本是把前几条标题拼起来
+    （实测 2 条报道就写成「A；A 的中译」），而**同一件事的多份标题本来就是相似措辞**,
+    拼起来等于把标题重复一遍，读者从正文里得不到任何信息。真正的增量只在多来源时出现,
+    所以只为参与者 ≥2 的事件写（见 `Summarizer.pending`）。
+    """
+    try:
+        result = await summarize.Summarizer.from_config(llm, config).refresh(db, limit=config.refresh_max_summaries)
+    except Exception as exc:  # 综述失败不阻断打分与快照
+        logger.warning("事件综述失败: %s: %s", type(exc).__name__, exc)
+        return
+    stats.summarized = result.written
+    stats.usage.extend(result.usage)
 
 
 async def _select(

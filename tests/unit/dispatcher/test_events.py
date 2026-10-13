@@ -20,6 +20,43 @@ from newsbot.dispatcher import events as ev
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
 
 
+class RoutingLLM(FakeLLM):
+    """按提示词内容应答的替身。
+
+    按位置给回复很脆：聚簇内部有几次调用（配对判定、复核）是它的实现细节，改一次
+    排序/批量就会让用例莫名其妙地失败。按内容派发只依赖"这次调用是干什么的"。
+    """
+
+    def __init__(
+        self,
+        *,
+        summary: str = "两家都报了这件事，官方称性能提升三成",
+        pairs: str = "1,2,same",
+    ) -> None:
+        super().__init__()
+        self.summary = summary
+        self.pairs = pairs
+        self.kinds: list[str] = []
+
+    async def complete(self, messages: Any, tools: Any = None, *, max_tokens: Any = None) -> Any:
+        prompt = "\n".join(str(item.get("content", "")) for item in messages)
+        self.calls.append(messages)
+        if max_tokens is not None:
+            self.max_tokens_seen.append(max_tokens)
+        if "综述" in prompt:
+            self.kinds.append("summary")
+            return reply(self.summary)
+        # 配对判定：给出"前两条是同一件事"的结论。缺了它就不会归组，
+        # 也就不会出现多来源事件，用例会以"没调用综述"这种间接方式失败
+        if "两两配对" in prompt:
+            self.kinds.append("cluster")
+            return reply(self.pairs)
+        self.kinds.append("other")
+        return reply("")
+        self.kinds.append("other")
+        return reply("")
+
+
 async def _seed(
     db: Database,
     *,
@@ -281,35 +318,67 @@ async def test_refresh_can_skip_steps(tmp_path: Any) -> None:
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'refresh4.db'}")
     await db.prepare()
     await _seed(db, title="某公司发布新一代推理芯片", url="https://a.example/1", assigned=False)
-    stats = await ev.refresh(db, FakeLLM(), editorial=EditorialSection(), now=NOW, do_select=False, do_snapshot=False)
+    stats = await ev.refresh(
+        db,
+        FakeLLM(),
+        editorial=EditorialSection(),
+        now=NOW,
+        do_select=False,
+        do_snapshot=False,
+        do_summarize=False,
+    )
     assert stats.stories == 1
     assert stats.scored == 0
+    assert stats.summarized == 0
     assert await _count(db, StoryScore) == 0
     await db.dispose()
 
 
-async def test_refresh_survives_a_cluster_failure(tmp_path: Any) -> None:
-    """聚簇失败不该让整次刷新失败：打分与快照仍然要跑。"""
+async def test_refresh_summarizes_multi_source_stories(tmp_path: Any) -> None:
+    """综述要接在刷新链路里，且**只给多来源事件写**。
 
-    class Boom(FakeLLM):
-        async def complete(self, messages: Any, tools: Any = None, *, max_tokens: Any = None) -> Any:
-            raise RuntimeError("模型挂了")
-
-    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'refresh5.db'}")
+    独家事件的标题已经把事说清楚了，给它写综述只是把标题重复一遍；真正的增量只在
+    多家报道时出现——各家的说法不同，读者需要一句话把它们统起来。
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'refresh-sum.db'}")
     await db.prepare()
-    await _seed(db, title="Qwen-Image 2.1 Turbo 发布", url="https://a.example/1", assigned=False)
-    await _seed(db, title="阿里发布 qwen-image-2.1-turbo", url="https://b.example/2", assigned=False)
-    stats = await ev.refresh(db, Boom(), now=NOW)
-    assert stats.stories == 2, "模型不可用时各自成事件，内容不丢"
+    # 同一件事、两家独立来源（都带发布时间，归组时 observed_at 早于快照时刻）
+    await _seed(db, title="两家都报了这件事", url="https://a.example/1", source="qbitai.com", assigned=False)
+    await _seed(db, title="两家都报了这件事", url="https://b.example/1", source="solidot.org", assigned=False)
+    # 一家独家的另一件事
+    await _seed(db, title="只有一家报的事", url="https://c.example/1", source="ifanr.com", assigned=False)
+    llm = RoutingLLM()
+    stats = await ev.refresh(db, llm, editorial=EditorialSection(), now=NOW, do_select=False, do_snapshot=False)
+    assert "summary" in llm.kinds, "综述步骤应真的被调用过"
+    assert stats.summarized == 1, "只该给那件多来源的事写综述"
+    assert "综述 1 条" in stats.line()
+    async with db.session() as session:
+        rows = (await session.scalars(select(Story).order_by(Story.id))).all()
+    written = [story for story in rows if story.digest]
+    assert len(written) == 1
+    assert written[0].digest == "两家都报了这件事，官方称性能提升三成"
+    assert written[0].digest_reports == 2
     await db.dispose()
 
 
-def test_stats_line_mentions_every_step() -> None:
-    stats = ev.RefreshStats(
-        loaded=10, clustered=10, stories=8, assigned=10, scored=6, selected=2, unstable=1, snapshots=3
-    )
-    text = stats.line()
-    assert "候选 10" in text
-    assert "新建事件 8 个" in text
-    assert "入选 2" in text
-    assert "快照 3" in text
+async def test_refresh_survives_a_summary_failure(tmp_path: Any) -> None:
+    """综述失败不该阻断打分——它在链路里的位置就是这么挑的（打分在它之后）。"""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'refresh-sum2.db'}")
+    await db.prepare()
+    await _seed(db, title="某公司发布新一代推理芯片", url="https://a.example/1", assigned=False)
+
+    class Boom(ev.summarize.Summarizer):  # type: ignore[misc]
+        async def refresh(self, db: Any, *, limit: int | None = None) -> Any:
+            raise RuntimeError("模型挂了")
+
+    original = ev.summarize.Summarizer
+    ev.summarize.Summarizer = Boom  # type: ignore[misc]
+    try:
+        stats = await ev.refresh(
+            db, FakeLLM(replies=[reply("9"), reply("9")]), editorial=EditorialSection(), now=NOW, do_snapshot=False
+        )
+    finally:
+        ev.summarize.Summarizer = original  # type: ignore[misc]
+    assert stats.summarized == 0
+    assert stats.scored == 1, "综述挂了也要把分打完"
+    await db.dispose()

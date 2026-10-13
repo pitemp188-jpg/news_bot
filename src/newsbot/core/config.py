@@ -147,6 +147,15 @@ class EditorialSection(BaseModel):
     refresh_interval_minutes: int = 30
     # 一次刷新最多给多少条报道打分。逐条两次调用 = 2 倍成本，条数必须有上限
     refresh_max_scores: int = 24
+    # 一次刷新最多为多少个事件写综述。只在**多来源**事件且上一位综述已过期时才写，
+    # 所以常态下这个上限很少触顶；触顶时优先处理"新报道攒得最多"的那些
+    refresh_max_summaries: int = 12
+    # 综述的输出上限。**必须给足**：这个端点是推理模型，推理与正文共用额度，
+    # 上限给小了的后果不是"写得短"而是"完全没有内容"——实测同一个端点在上限 4000
+    # 时返回过空正文（聚簇那边已因此踩过一次）。它只是上限，不会白花钱
+    summary_max_tokens: int = 8000
+    # 综述的单条超时。跟着输出上限走：上限提到 8000 后模型有机会真的写完推理
+    summary_timeout_seconds: float = 150.0
 
     def tier_of(self, source: str, url: str) -> str:
         """按来源域名判信源分级；不在名单里一律 T2。
