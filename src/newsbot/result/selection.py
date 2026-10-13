@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from newsbot.core.config import EditorialSection
 from newsbot.core.db import Database
@@ -306,18 +306,37 @@ async def save_scores(db: Database, selection: Selection) -> int:
 
     落库的目的是事后能解释"为什么它没进"：只把入选的记下来，读者问起落选原因时
     无据可查，也就无从改进标准。
+
+    **必须用单条原子的 upsert**，不能"先查再写"：真实长跑里两个服务实例的 30 分钟
+    定时刷新同时打分，两边的查询都返回"还没有"，插入时撞上
+    `UNIQUE constraint failed: story_score.news_item_id`，那一批判定就整批丢了。
+    `ON CONFLICT` 把查询与写入合成一条语句，竞态窗口从结构上消失。
     """
     if not selection.scores:
         return 0
     async with db.session() as session:
         for score in selection.scores:
-            stored = await session.scalar(select(StoryScore).where(StoryScore.news_item_id == score.news_item_id))
             row = score.to_row()
-            if stored is not None:
-                stored.score1, stored.score2 = row.score1, row.score2
-                stored.selected, stored.reason = row.selected, row.reason
-                continue
-            session.add(row)
+            statement = (
+                sqlite_insert(StoryScore)
+                .values(
+                    news_item_id=row.news_item_id,
+                    score1=row.score1,
+                    score2=row.score2,
+                    selected=row.selected,
+                    reason=row.reason,
+                )
+                .on_conflict_do_update(
+                    index_elements=[StoryScore.news_item_id],
+                    set_={
+                        "score1": row.score1,
+                        "score2": row.score2,
+                        "selected": row.selected,
+                        "reason": row.reason,
+                    },
+                )
+            )
+            await session.execute(statement)
         await session.commit()
     return len(selection.scores)
 
