@@ -473,3 +473,38 @@ async def test_assign_logs_when_the_model_returns_empty_content() -> None:
         [_candidate(1, "Qwen-Image 2.1 Turbo"), _candidate(2, "qwen-image-2.1-turbo")]
     )
     assert sum(len(cluster.members) for cluster in plan.clusters) == 2, "拿不到结论就不合并"
+
+
+async def test_story_timestamps_match_its_report_rows(tmp_path: Any) -> None:
+    """事件的时间口径必须与逐条报道同一把尺子。
+
+    回归用例：`last_seen_at` 曾按 `published_at` 算，而详情页逐行显示的是
+    `observed_at`；发布时间为空的条目在 `observed_at` 上会回退成写入时刻，于是头部写
+    「最新进展 10月12日 14:44」、底下那条报道却是「10月13日 11:24」，同一个事件自相
+    矛盾。改为从实际落库的报道推导后，一致性由构造保证。
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'cluster-time.db'}")
+    await db.prepare()
+    # 一条有发布时间（旧），一条**没有**发布时间（observed_at 会回退成写入时刻）
+    published = await _seed(db, title="有日期的一手", url="https://a.example/1", hours=20)
+    async with db.session() as session:
+        bare = NewsItem(url="https://b.example/2", url_hash="https://b.example/2", title="没有日期的后续")
+        session.add(bare)
+        await session.commit()
+        bare_id = bare.id
+    items = [
+        cl.Candidate(news_item_id=published, title="有日期的一手", source="量子位"),
+        cl.Candidate(news_item_id=bare_id, title="没有日期的后续", source="infoq"),
+    ]
+    await cl.write_plan(db, await _plan([published, bare_id]), items)
+
+    async with db.session() as session:
+        story = (await session.scalars(select(Story))).one()
+        rows = (await session.scalars(select(ReportItem).where(ReportItem.story_id == story.id))).all()
+    moments = [row.observed_at if row.observed_at.tzinfo else row.observed_at.replace(tzinfo=UTC) for row in rows]
+    assert story.last_seen_at is not None and story.first_seen_at is not None
+    seen = story.last_seen_at if story.last_seen_at.tzinfo else story.last_seen_at.replace(tzinfo=UTC)
+    first_seen = story.first_seen_at if story.first_seen_at.tzinfo else story.first_seen_at.replace(tzinfo=UTC)
+    assert abs((seen - max(moments)).total_seconds()) < 1, "头部「最新进展」要与最新那条报道一致"
+    assert abs((first_seen - min(moments)).total_seconds()) < 1, "「首次出现」同理"
+    await db.dispose()

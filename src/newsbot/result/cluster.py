@@ -643,6 +643,21 @@ async def write_plan(db: Database, plan: Plan, items: list[Candidate]) -> dict[s
                     )
                 )
                 stats["items"] += 1
+            # 事件的时间口径必须与逐条报道**同一把尺子**：上面按 `published_at` 算
+            # `last_seen_at`，而详情页逐行显示的是 `observed_at`，发布时间为空的条目
+            # 在 `observed_at` 上会回退成写入时刻。混用两套时钟的结果是头部写「最新进展
+            # 10月12日 14:44」、下面那条报道却是「10月13日 11:24」——同一个事件自相矛盾。
+            # 改为从实际落库的报道推导，一致性由构造保证。
+            await session.flush()
+            observed = list(
+                (await session.scalars(select(ReportItem.observed_at).where(ReportItem.story_id == story.id))).all()
+            )
+            if observed:
+                moments = [row if row.tzinfo else row.replace(tzinfo=UTC) for row in observed]
+                story.first_seen_at = min(moments)
+                story.last_seen_at = max(moments)
+                if story.title != group[0].title:
+                    continue
         await session.commit()
     return stats
 
