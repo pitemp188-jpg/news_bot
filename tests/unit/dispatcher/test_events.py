@@ -1,6 +1,6 @@
 """
 模块: tests.unit.dispatcher.test_events
-职责: 校验事件层刷新——聚簇 → 打分 → 快照的顺序、待打分筛选、重建与容错
+职责: 校验事件层刷新——聚簇 → 打分 → 快照、待打分筛选、重建与容错
 依赖: dispatcher.events
 """
 
@@ -32,8 +32,20 @@ async def _seed(
     locked: bool = False,
     scored: bool = False,
     hours: float = 1,
+    base: datetime | None = None,
+    published: bool = True,
 ) -> tuple[int, int]:
-    """建一条资讯，可选地归入一个事件。返回 (news_item_id, story_id)。"""
+    """建一条资讯，可选地归入一个事件。返回 (news_item_id, story_id)。
+
+    `base` 默认是固定的 `NOW`；要用**真实时钟**做断言（例如快照时刻）时传
+    `datetime.now(UTC)`——固定的 `NOW` 相对真实时钟可能落在未来，而热度算法会
+    跳过未来的证据。
+
+    `published=False` 模拟 `published_at` 为空的条目（真实库里大量如此，那一列是
+    M12 才补上的）。此时归组的 `observed_at` 会**回退成写入时刻**，这正是快照
+    时刻必须取"当下"的原因。
+    """
+    moment = base or NOW
     async with db.session() as session:
         item = NewsItem(
             url=url,
@@ -41,15 +53,15 @@ async def _seed(
             title=title,
             source=source,
             summary="官方称性能提升三成",
-            published_at=NOW - timedelta(hours=hours),
-            fetched_at=NOW - timedelta(hours=hours),
+            published_at=(moment - timedelta(hours=hours)) if published else None,
+            fetched_at=moment - timedelta(hours=hours),
         )
         session.add(item)
         await session.flush()
         story = Story(
             title=title,
-            first_seen_at=NOW - timedelta(hours=hours),
-            last_seen_at=NOW - timedelta(hours=hours),
+            first_seen_at=moment - timedelta(hours=hours),
+            last_seen_at=moment - timedelta(hours=hours),
             locked=locked,
         )
         session.add(story)
@@ -63,7 +75,7 @@ async def _seed(
                     tier=tier,
                     role="primary",
                     editorial=editorial,
-                    observed_at=NOW - timedelta(hours=hours),
+                    observed_at=moment - timedelta(hours=hours),
                 )
             )
         if scored:
@@ -187,6 +199,67 @@ async def test_refresh_clusters_then_scores(tmp_path: Any) -> None:
     # 只有一家来源的事件**不**进榜（进榜要求参与者 ≥2 且编辑类来源 ≥1），
     # 所以这里不该有快照——快照只写给够门槛的事件
     assert await _count(db, HotSnapshot) == 0, "独家报道不是热点，不该留快照"
+    await db.dispose()
+
+
+async def test_refresh_snapshots_at_the_current_moment(tmp_path: Any) -> None:
+    """快照必须按**当下**时刻算，不能复用链路开头的时间戳。
+
+    回归用例：`refresh` 开头取过一次 `moment`，而聚簇写入的 `report_item.observed_at`
+    是**写入时刻**、晚于那个时间戳；`heat_at` 会跳过 `observed_at > at` 的证据
+    （历史回溯时必须排除未来证据），于是快照步骤看到的参与者恒为 0。真实跑 147 条时
+    正是如此——「逐小时热度快照」一条都没写过，也从不报错。
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'snapshot.db'}")
+    await db.prepare()
+    base = datetime.now(UTC)
+    # 两家独立来源报道同一件事 → 够进榜门槛。**发布时间留空**：真实库里大量条目如此
+    # （那一列是 M12 才补上的），此时归组写下的 observed_at 就是"写入时刻"，晚于
+    # 链路开头取的时刻——这正是缺陷的触发条件。
+    await _seed(
+        db,
+        title="两家都报了这件事",
+        url="https://a.example/1",
+        source="qbitai.com",
+        assigned=False,
+        base=base,
+        published=False,
+    )
+    await _seed(
+        db,
+        title="两家都报了这件事",
+        url="https://b.example/1",
+        source="solidot.org",
+        assigned=False,
+        base=base,
+        published=False,
+    )
+
+    seen: list[datetime] = []
+    original = ev.hot.snapshot
+
+    async def spy(db_: Any, at: datetime | None = None) -> int:
+        seen.append(at or datetime.now(UTC))
+        return await original(db_, at)
+
+    ev.hot.snapshot = spy  # type: ignore[assignment]
+    try:
+        # **不传 now**：用真实时钟，才能再现"开头的时刻早于写入时刻"。第一条回复是
+        # 聚簇的配对判定（把两条并成一件事），之后的打分调用拿不到脚本回复、按未入选处理
+        llm = FakeLLM(replies=[reply("1,2,same")])
+        stats = await ev.refresh(db, llm)
+    finally:
+        ev.hot.snapshot = original  # type: ignore[assignment]
+
+    assert seen, "快照步骤应被调用"
+    async with db.session() as session:
+        observed = list((await session.execute(select(ReportItem.observed_at))).scalars())
+    assert len(observed) == 2, "两条报道要归入同一个事件"
+    moment = seen[0]
+    assert moment >= max(row.replace(tzinfo=UTC) if row.tzinfo is None else row for row in observed), (
+        "快照时刻不能早于它要观测的证据"
+    )
+    assert stats.snapshots == 1, "够门槛的事件要留下快照"
     await db.dispose()
 
 

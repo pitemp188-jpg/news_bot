@@ -86,7 +86,8 @@ async def refresh(
     1. **聚簇**：只有先归组，才有"同一件事被多少家独立来源报道过"这个量。
     2. **精选**：打分按 (报道, 门槛) 存进 `story_score`，日报靠它排序。
        它读的是**已归组的报道**，所以必须在聚簇之后。
-    3. **热度快照**：读的是 `report_item` 的参与者，同样依赖第 1 步。
+    3. **热度快照**：读的是 `report_item` 的参与者，同样依赖第 1 步。它取的是
+       **当下**的时刻而不是本次刷新的起始时刻，原因见下方注释。
 
     每一步失败都**不阻断后面**（各自 try 住）：聚簇失败时精选仍可对旧事件打分，
     快照失败也不影响已经落库的分组——一次刷新里任何一步都是"尽量多做一点"，
@@ -102,8 +103,12 @@ async def refresh(
     if do_select:
         await _select(db, llm, config, moment, stats)
     if do_snapshot:
+        # 快照的时间必须是**当下**，不能复用链路开头那个 `moment`：聚簇写入的
+        # `report_item.observed_at` 是写入时刻，晚于开头几秒到几分钟，而 `heat_at`
+        # 会跳过 `observed_at > at` 的证据（历史回溯时必须排除未来证据）。真实跑
+        # 147 条时正因如此快照恒为 0 条——功能一直在静默空转，从不报错。
         try:
-            stats.snapshots = await hot.snapshot(db, moment)
+            stats.snapshots = await hot.snapshot(db, now or datetime.now(UTC))
         except Exception as exc:  # 快照失败不影响已落库的分组与评分
             logger.warning("热度快照失败: %s: %s", type(exc).__name__, exc)
 

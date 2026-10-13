@@ -18,6 +18,7 @@ from newsbot.core.db import Database
 from newsbot.core.errors import RetriableError
 from newsbot.core.log import get_logger
 from newsbot.core.models import LlmUsage, NewsItem, Report, Task
+from newsbot.core.quality import is_listing
 from newsbot.dispatcher.session import SessionStore
 from newsbot.result.dedup import Deduper, Item, content_digest, simhash64, simhash_hex, url_digest
 
@@ -232,7 +233,19 @@ class Pipeline:
         # 这里只留日志，便于排查"为什么这条没列出来"。
 
     async def _store_sources(self, sources: list[dict[str, str]]) -> None:
-        """把新来源写入资讯库，供后续任务复用与去重。"""
+        """把新来源写入资讯库，供后续任务复用、聚簇与去重。
+
+        **列表页 / 搜索页不入库**：Agent 为了找线索会去抓 GitHub Trending、财经频道、
+        搜索结果页，那些页面一旦入库就会变成"报道"，还得跟真文章一起去聚簇。
+        实测 158 条里有 11 条是这类页面（7%），其中两条互相聚成了一个"事件"并占了
+        热度榜首位。判据与实测依据见 `core.quality`。
+        """
+        if not sources:
+            return
+        kept = [item for item in sources if not is_listing(str(item.get("title", "")), str(item.get("url", "")))]
+        if len(kept) != len(sources):
+            logger.info("跳过 %d 条列表页 / 搜索页来源，不入资讯库", len(sources) - len(kept))
+        sources = kept
         if not sources:
             return
         url_hashes = [url_digest(str(item.get("url", ""))) for item in sources]

@@ -32,6 +32,7 @@ news_bot/
 │   │   ├── log.py               # 日志与脱敏
 │   │   ├── db.py                # 引擎与会话
 │   │   ├── models.py            # 全部 ORM 模型
+│   │   ├── quality.py           # 来源质量：列表页 / 搜索页不是文章（agent 与 dispatcher 共用）
 │   │   ├── errors.py            # 错误类型
 │   │   └── llm.py               # LLM 客户端（agent 与 result 共用）
 │   ├── gateway/

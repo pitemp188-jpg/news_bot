@@ -22,6 +22,7 @@ from newsbot.agent.tools.base import Source, ToolResult
 from newsbot.core.config import AgentSection, FeedSource, Secrets, default_feeds
 from newsbot.core.errors import RetriableError
 from newsbot.core.log import get_logger
+from newsbot.core.quality import LISTING_TITLE
 
 logger = get_logger(__name__)
 
@@ -77,21 +78,10 @@ _LOW_QUALITY = re.compile(
 _TOKEN_SPLIT = re.compile(r"\s+|[，。！？、；：（）「」【】《》,.!?;:()\[\]\"'“”‘’]+")
 
 
-# 栏目页 / 首页：RSS 里常混进一条"频道自己"的条目。实测抓到的原文标题——
-# 「股票频道 - 东方财富网」「公司资讯 _ 东方财富网」「全球财经快讯_东方财富网」
-# 「财经滚动新闻_新浪网」「新华保险 举牌 国泰海通 - 搜索」
-# 「AI News & Artificial Intelligence | TechCrunch」「Artificial Intelligence | The Verge」
-# 「Trending  repositories on GitHub today · GitHub」
-# 「华尔街见闻 - 7×24小时全球财经资讯与金融市场直播」。
-# 它们不是文章：留着会挤掉真内容，还会被判成"同一件事"——实测两条这样的条目真的被
-# 聚簇合成了一个"事件"。
-#
-# 判据一：**与频道标题逐字相同**（最精确，不会误伤文章标题，见 `_channel_title`）。
-# 判据二：标题以「分隔符 + 短站点名」结尾。分隔符**前面必须有空白**——这一条是整个
-# 规则零误伤的关键：`MiMo-V2.6`、`Microsoft-Decision-1`、`GPT-6` 里的连字符前后没有
-# 空格，都是正常文章标题，不能当分隔符。尾部排除句子标点，避免把长句子当站点名。
-# 该规则在库里 158 条真实标题上验证：8/8 召回（上面那些全部命中）、0 条文章被误伤。
-_INDEX_PAGE = re.compile(r"(?:\s[|\-·—]\s*|_\s*)[^。！？，,]{1,20}$")
+# 栏目页 / 首页：RSS 里常混进一条"频道自己"的条目，判据见 `core.quality`——
+# 那里说明了为什么这样切、以及实测的召回与误伤。这里补一条 RSS 才有的更强判据：
+# **与频道标题逐字相同**（最精确，不会误伤文章标题，见 `_channel_title`）。
+_INDEX_PAGE = LISTING_TITLE  # 判据与实测依据见 core.quality
 
 
 def _unwrap(url: str) -> str:
