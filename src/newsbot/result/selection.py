@@ -179,17 +179,10 @@ def parse_score(text: str) -> int | None:
 def classify_tier(source: str, url: str, *, official: list[str], quasi: list[str]) -> str:
     """按来源域名判信源分级；不在名单里一律 T2。
 
-    用"是否在名单里"而不是猜测：把自己不认识的来源判成官方，等于替读者做了
-    "这条更可信"的背书，而背书必须有据可依。
+    实现委托给 `EditorialSection.tier_of`：分级规则只能有一份，否则"页面显示官方一手、
+    算法按媒体算"这种分叉迟早出现。这里保留函数形式是为了调用方不必自己拼配置对象。
     """
-    host = _host(url) or _host(source)
-    if not host:
-        return DEFAULT_TIER
-    if _in_list(host, official):
-        return TIER_OFFICIAL
-    if _in_list(host, quasi):
-        return TIER_QUASI
-    return DEFAULT_TIER
+    return EditorialSection(official_domains=official, quasi_official_domains=quasi).tier_of(source, url)
 
 
 def _host(value: str) -> str:
@@ -199,10 +192,6 @@ def _host(value: str) -> str:
     if "//" in text:
         text = text.split("//", 1)[1]
     return text.split("/", 1)[0].split("@")[-1].split(":", 1)[0]
-
-
-def _in_list(host: str, domains: list[str]) -> bool:
-    return any(host == domain or host.endswith(f".{domain}") for domain in (item.lower().strip() for item in domains))
 
 
 @dataclass

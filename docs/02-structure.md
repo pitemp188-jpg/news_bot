@@ -44,7 +44,8 @@ news_bot/
 │   ├── dispatcher/
 │   │   ├── queue.py             # 任务队列、worker、超时重试取消、恢复
 │   │   ├── session.py           # 会话上下文
-│   │   ├── scheduler.py         # 定时调度
+│   │   ├── scheduler.py         # 定时调度（订阅作业 + 事件层刷新作业）
+│   │   ├── events.py            # 事件层刷新：聚簇未归组资讯 → 两轮打分精选 → 逐小时热度快照
 │   │   └── pipeline.py          # 执行流水线 agent→result→send
 │   ├── agent/
 │   │   ├── runner.py            # 规划循环

@@ -17,6 +17,7 @@ from tests.fakes.llm import FakeLLM, reply
 from newsbot.app import App, run_service
 from newsbot.core.config import Config, ScheduleSection, Secrets
 from newsbot.core.models import Schedule, Task
+from newsbot.dispatcher.scheduler import REFRESH_JOB_ID
 
 pytestmark = pytest.mark.integration
 
@@ -36,6 +37,12 @@ async def _app(tmp_path: Path, adapter: FakeAdapter | None = None, **schedule: o
     app = App(config, llm=FakeLLM(replies=[reply("结果 [1]")]), adapters=[fake])
     await app.start()
     return app, fake
+
+
+def _schedule_jobs(app: App) -> set[str]:
+    """订阅作业集合。事件层刷新作业与订阅无关、启动即挂上，故先剔除。"""
+    assert app.scheduler is not None
+    return app.scheduler.job_ids() - {REFRESH_JOB_ID}
 
 
 async def _drain(app: App, timeout: float = 5.0) -> None:
@@ -77,7 +84,7 @@ async def test_start_registers_adapters_and_stops(tmp_path: Path) -> None:
     try:
         assert app.router is not None and app.router.platforms == ["weixin"]
         assert adapter.connect_calls == 1
-        assert app.scheduler is not None and app.scheduler.job_ids() == set()
+        assert _schedule_jobs(app) == set()
     finally:
         await app.stop()
     assert adapter.disconnect_calls == 1
@@ -94,7 +101,7 @@ async def test_first_message_creates_default_schedule_and_replies(tmp_path: Path
             ("0 21 * * *", ["AI"], "weixin", "u1")
         ]
         assert app.scheduler is not None
-        assert app.scheduler.job_ids() == {f"schedule-{rows[0].id}"}
+        assert _schedule_jobs(app) == {f"schedule-{rows[0].id}"}
         assert adapter.sent and "已默认开启每日 21:00" in adapter.sent[0][1]
         assert "已收到" in adapter.sent[0][1]
 

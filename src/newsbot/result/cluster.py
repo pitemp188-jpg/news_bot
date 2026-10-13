@@ -36,8 +36,10 @@ ROLE_PRIMARY = "primary"
 ROLE_FOLLOW_UP = "follow_up"
 ROLE_DUPLICATE = "duplicate"
 
-# 模型输出：`左编号,右编号,关系`。只要整行符合这个形状才采纳，其余行忽略
-_REL_LINE = re.compile(r"^\s*(\d+)\s*[,，\s]\s*(\d+)\s*[,，\s]\s*([a-z_]+)\s*$", re.MULTILINE)
+# 模型输出：`左编号,右编号,关系`。只认符合这个形状的行，其余行忽略。
+# 容错要点（实测模型会很自然地把结论写成 `- 1,2,same` 或 `` `1,2,same` ``）：
+# 允许行首的项目符号与反引号，允许行尾的反引号与句号
+_REL_LINE = re.compile(r"^\s*[-*•`]*\s*(\d+)\s*[,，\s]\s*(\d+)\s*[,，\s]\s*([a-z_]+)\s*[`.]*\s*$", re.MULTILINE)
 # 复核阶段的"否"：整行是一个 `no` / `不同`
 _VETO_LINE = re.compile(r"^\s*(?:no|不同|否|不是)\s*$", re.MULTILINE | re.IGNORECASE)
 
@@ -71,7 +73,13 @@ _REVIEW_TAIL = """
 
 # 聚簇是机械型任务，但当前模型是推理模型：推理 token 与正文共用输出额度，
 # 上限给小了会出现"调用成功但正文为空"（实测 1000 时正文为空）
-_CLUSTER_MAX_TOKENS = 4000
+_CLUSTER_MAX_TOKENS = 16000
+# "不确定就合并"要求的最低结论覆盖面。低于它就说明这些配对根本没问到模型，
+# 不合并（宁可漏合并，也不能凭空把几十条资讯并成一件事）
+MIN_COVERAGE = 0.5
+# 预筛认为"有识别力"的标识符最小长度。实测 `2.1`、`1000` 这类短碎片会把两件毫不
+# 相干的事拉到一起（「Mellum2.1」对「Nano Banana 2.1」），详见 `_specific_identifiers`
+MIN_IDENTIFIER_CHARS = 8
 
 
 @dataclass
@@ -149,9 +157,11 @@ def _host(value: str) -> str:
 
 
 def is_community(url: str, domains: list[str]) -> bool:
-    """是否社区来源：讨论算热度但不计入独立来源数。"""
-    host = _host(url)
-    return any(host == item or host.endswith(f".{item}") for item in (name.lower() for name in domains))
+    """是否社区来源：讨论算热度但不计入独立来源数。
+
+    委托给 `EditorialSection.is_community`（配置是名单的唯一来源）。
+    """
+    return EditorialSection(community_domains=list(domains)).is_community(url)
 
 
 def candidate_pairs(items: list[Candidate], *, floor: float) -> list[tuple[int, int]]:
@@ -160,33 +170,58 @@ def candidate_pairs(items: list[Candidate], *, floor: float) -> list[tuple[int, 
     阈值**故意远低于判重阈值**：这一步是"选谁去问模型"，漏掉的配对模型永远看不到，
     所以宁可多问。除了词集相似度，**共带数字的标识符**（`qwen-image-2.1-turbo`）直接
     入选——它是唯一能跨中英文对齐同一件事的词法证据，而词集相似度在中英混排时会很低。
+
+    结果按"像"的程度**降序**返回：配对总量有预算（`cluster_pair_budget`），超预算时
+    被砍掉的是排在后面的，所以排序决定了取舍是否有依据。
     """
-    pairs: list[tuple[int, int]] = []
+    scored: list[tuple[float, int, int]] = []
     for index, left in enumerate(items):
         for right in items[index + 1 :]:
-            if _plausible(left, right, floor):
-                pairs.append((left.news_item_id, right.news_item_id))
-    return pairs
+            score = _plausibility(left, right, floor)
+            if score > 0:
+                scored.append((score, left.news_item_id, right.news_item_id))
+    scored.sort(key=lambda row: (-row[0], row[1], row[2]))
+    return [(left, right) for _, left, right in scored]
 
 
-def _plausible(left: Candidate, right: Candidate, floor: float) -> bool:
-    """两个条目是否值得让模型判断。
+def _plausibility(left: Candidate, right: Candidate, floor: float) -> float:
+    """两个条目的"像"的程度；0 表示不值得让模型判断。
 
-    标识符判断不能只做"集合相等"：`identifiers()` 取的是整段 token，实测
-    「Qwen-Image 2.1 Turbo」切成 ``2.1``、而「阿里发布 qwen-image-2.1-turbo」是完整的
-    ``qwen-image-2.1-turbo``，两边**不相等**却说的是同一件事。所以还要做子串包含判断。
-    这只是预筛（召回用），误报的代价是多问模型一对，可以接受。
+    返回分数而不是布尔值，是为了让"配对超预算"时的取舍有依据。标识符相关给最高分：
+    `identifiers()` 取的是整段 token，实测「Qwen-Image 2.1 Turbo」切成 ``2.1``、而
+    「阿里发布 qwen-image-2.1-turbo」是完整的 ``qwen-image-2.1-turbo``，两边**不相等**
+    却说的是同一件事，所以还要做子串包含判断。这只是预筛（召回用），误报的代价是
+    多问模型一对，可以接受——但**短碎片不算**（见 `_specific_identifiers`）。
     """
     left_body, right_body = left.body.lower(), right.body.lower()
-    left_terms, right_terms = identifiers(left.body), identifiers(right.body)
+    left_terms, right_terms = _specific_identifiers(left.body), _specific_identifiers(right.body)
     if left_terms & right_terms:
-        return True
+        return 1.0
     if any(term in right_body for term in left_terms) or any(term in left_body for term in right_terms):
-        return True
+        return 0.9
     left_tokens, right_tokens = set(_tokens(left.body)), set(_tokens(right.body))
     if len(left_tokens) < 3 or len(right_tokens) < 3:
-        return False
-    return jaccard(left_tokens, right_tokens) >= floor
+        return 0.0
+    overlap = jaccard(left_tokens, right_tokens)
+    return overlap if overlap >= floor else 0.0
+
+
+def _specific_identifiers(text: str) -> set[str]:
+    """预筛专用：只保留**够具体**的标识符。
+
+    实测为什么必须过滤：`identifiers()` 会把 `2.1`、`gpt-6`、`1000` 这类短串也取出来，
+    而它们毫无识别力——
+    - 「JetBrains Releases Mellum2.1」与「Nano Banana终于2.1了」共享 `2.1`，是两件事；
+    - 「…突围GPT-6」与「GPT-6.1 Sol 极速版上线」共享 `gpt-6`，也是两件事；
+    - `1000 多次 PR` 与另一个标题共享 `1000`。
+
+    这些假阳性不只是浪费模型调用，还会把无关条目推进同一批判定里（模型得在噪声里
+    找信号）。要求长度 ≥ 8 且含字母：`qwen-image-2.1-turbo`、`microsoft-decision-1`
+    这类真正的产品/版本串照旧命中，短碎片被挡掉。
+    """
+    return {
+        term for term in identifiers(text) if len(term) >= MIN_IDENTIFIER_CHARS and any(ch.isalpha() for ch in term)
+    }
 
 
 def parse_relations(text: str, allowed: set[int]) -> dict[tuple[int, int], str]:
@@ -195,6 +230,9 @@ def parse_relations(text: str, allowed: set[int]) -> dict[tuple[int, int], str]:
     解析不出来**不报错**：调用方按"不确定"处理（见 `Clusterer.assign`），
     而不是当成"两件事无关"——把模型输出解析失败理解成否定结论，会让本该合并的
     报道各自成事件，进而让日报里出现同一件事的多条。
+
+    每个编号都要在 `allowed` 里：模型偶尔会把示例里的编号抄进结论（提示词里有
+    `1,3,same` 这个例子），不校验就会凭空造出一对。
     """
     found: dict[tuple[int, int], str] = {}
     for left, right, relation in _REL_LINE.findall(text or ""):
@@ -203,6 +241,14 @@ def parse_relations(text: str, allowed: set[int]) -> dict[tuple[int, int], str]:
             continue
         found[(min(a, b), max(a, b))] = name
     return found
+
+
+def summarise(relations: dict[tuple[int, int], str]) -> str:
+    """按关系类型统计，便于一眼看出"模型判了什么"而不是只能看到总数。"""
+    counts = {name: 0 for name in RELATIONS}
+    for relation in relations.values():
+        counts[relation] = counts.get(relation, 0) + 1
+    return "，".join(f"{name} {count}" for name, count in counts.items() if count)
 
 
 def parse_vetoes(text: str, total: int) -> set[int]:
@@ -255,12 +301,74 @@ class Clusterer:
         return f"{_REVIEW_PROMPT}\n" + "\n".join(lines) + f"\n{_REVIEW_TAIL}"
 
     async def _ask(self, prompt: str) -> tuple[str, Usage | None]:
+        """一次模型调用。**必须记录 token 用量**：这个端点是推理模型，推理与正文
+        共用输出额度，额度被推理吃光时调用"成功"却返回空正文——不打印用量就只能
+        看到"模型没给结论"，无从判断是提示词不行还是额度不够。
+        """
         reply = await asyncio.wait_for(
-            self.llm.complete([{"role": "user", "content": prompt}], max_tokens=_CLUSTER_MAX_TOKENS),
+            self.llm.complete([{"role": "user", "content": prompt}], max_tokens=self.config.cluster_max_tokens),
             self.config.cluster_timeout_seconds,
         )
         used = reply.usage() if (reply.prompt_tokens or reply.completion_tokens) else None
-        return reply.content or "", used
+        content = reply.content or ""
+        if not content.strip():
+            logger.warning(
+                "模型返回空正文（prompt %d / completion %d token，上限 %d）：推理多半把输出额度吃光了",
+                reply.prompt_tokens,
+                reply.completion_tokens,
+                self.config.cluster_max_tokens,
+            )
+        return content, used
+
+    async def _judge(
+        self, by_id: dict[int, Candidate], pairs: list[tuple[int, int]], plan: Plan
+    ) -> dict[tuple[int, int], str]:
+        """把配对**分批**交给模型判定，返回"配对 → 关系"。
+
+        为什么必须分批：实测一次给 60 对时，推理模型把输出额度（4000 token）全花在
+        推理上，调用耗时 63 秒却返回**空正文**——结论一条都拿不到。批次变小后每批的
+        推理量随之变小，正文能正常产出；而且所有配对都判得到，不会像截断那样静默丢掉
+        大部分（实测 221 对里只判了 60 对）。
+
+        某一批失败（超时、空正文、解析不出来）只影响那一批：**这一批的配对按"不确定"
+        处理**（`_effective` 会合并），而不是让整次聚簇退回"各自成事件"。
+        """
+        batch = max(self.config.cluster_max_pairs, 1)
+        chunks = [pairs[index : index + batch] for index in range(0, len(pairs), batch)]
+        relations: dict[tuple[int, int], str] = {}
+        empty_batches = 0
+        for number, chunk in enumerate(chunks, 1):
+            try:
+                text, used = await self._ask(self.build_pair_prompt(by_id, chunk))
+            except Exception as exc:
+                logger.warning("第 %d/%d 批配对判定失败: %s: %s", number, len(chunks), type(exc).__name__, exc)
+                empty_batches += 1
+                continue
+            if used is not None:
+                plan.usage.append(used)
+            found = parse_relations(text, set(by_id))
+            if not found:
+                empty_batches += 1
+                # 分辨"模型说都不同"与"输出没被解析出来"必须靠原始输出：只看总数
+                # 会让人以为是后者，实际可能只是这一批真的没重复
+                logger.warning(
+                    "第 %d/%d 批没有解析出结论，原始输出: %s", number, len(chunks), (text or "").strip()[:200]
+                )
+                continue
+            relations.update(found)
+            logger.info("第 %d/%d 批：%s（%d/%d 对）", number, len(chunks), summarise(found), len(found), len(chunk))
+        covered = len(relations)
+        logger.info(
+            "配对判定完成：%d 批，解析出 %d/%d 对结论，%d 批无结论",
+            len(chunks),
+            covered,
+            len(pairs),
+            empty_batches,
+        )
+        if not relations:
+            # 整批都没结论 = 模型这次不可用，按"不做合并"处理（见 `_effective`）
+            logger.warning("所有批次都没有结论，本次不做合并")
+        return relations
 
     async def assign(self, items: list[Candidate]) -> Plan:
         """给出聚簇方案；任何模型侧失败都退回"每条各自成事件"。
@@ -274,18 +382,14 @@ class Clusterer:
             return plan
         by_id = {item.news_item_id: item for item in items}
         pairs = candidate_pairs(items, floor=self.config.cluster_pair_floor)
-        if len(pairs) > self.config.cluster_max_pairs:
-            logger.warning("候选配对 %d 对超过上限，只处理前 %d 对", len(pairs), self.config.cluster_max_pairs)
-            pairs = pairs[: self.config.cluster_max_pairs]
+        budget = self.config.cluster_pair_budget
+        if len(pairs) > budget:
+            # 配对已按相似度降序，砍尾就是砍"最不像的"那些——按编号顺序砍等于随机砍
+            logger.warning("候选配对 %d 对超过预算 %d，按相似度保留前 %d 对", len(pairs), budget, budget)
+            pairs = pairs[:budget]
         relations: dict[tuple[int, int], str] = {}
         if pairs:
-            try:
-                text, used = await self._ask(self.build_pair_prompt(by_id, pairs))
-                if used is not None:
-                    plan.usage.append(used)
-                relations = parse_relations(text, set(by_id))
-            except Exception as exc:
-                logger.warning("聚簇判定失败，本次不做合并: %s: %s", type(exc).__name__, exc)
+            relations = await self._judge(by_id, pairs, plan)
         plan.pairs = [
             Pair(
                 left=left,
@@ -370,14 +474,26 @@ def _merge(items: list[Candidate], relations: dict[tuple[int, int], str]) -> lis
 
 
 def _effective(relations: dict[tuple[int, int], str], pairs: list[tuple[int, int]]) -> dict[tuple[int, int], str]:
-    """把"模型没给结论"的配对也算成合并，但**整批都没有结论时一律不合并**。
+    """把"模型没给结论"的配对也算成合并——但只在**结论覆盖面足够**时才这么做。
 
-    区分这两种情况是关键：个别配对缺结论只是那一对没答上来，合并它、让复核阶段去拆,
-    代价远小于让一件事裂成两条各自进日报；而整批没有结论（输出为空、解析全失败）说明
-    模型这次不可用，这时"全并成一条"会把几十条资讯变成一件事，事件页与日报都没法看。
+    为什么要合并没结论的配对：漏合并会让同一件事裂成两条各自进日报（正是要修的毛病），
+    多合并只是把一条后续进展挂到同一件事上，外观仍合理，而且下一段复核专门负责拆开。
+
+    为什么要卡覆盖面：分批判定时单个批次失败（超时、空正文）只影响那一批，若不加限制，
+    "少数批次成功 + 多数批次失败"就会把大批**从未问过模型**的配对当成"同一件事"合并
+    ——那比不合并糟得多。所以覆盖面低于 `MIN_COVERAGE` 时，未获结论的配对一律按"不算"
+    处理（不合并），宁可漏合并也不凭空造出巨大事件。
     """
-    if not relations:
+    if not relations or not pairs:
         return {}
+    if len(relations) / len(pairs) < MIN_COVERAGE:
+        logger.warning(
+            "配对结论只覆盖 %d/%d（低于 %d%%），未获结论的配对不合并",
+            len(relations),
+            len(pairs),
+            int(MIN_COVERAGE * 100),
+        )
+        return {key: value for key, value in relations.items()}
     merged = dict(relations)
     for left, right in pairs:
         merged.setdefault((left, right), REL_SAME)
@@ -422,8 +538,19 @@ def pick_primary(items: list[Candidate]) -> int:
     ).news_item_id
 
 
-async def load_candidates(db: Database, *, days: int, now: datetime | None = None) -> list[Candidate]:
-    """读取最近 `days` 天内已入库、且**尚未归入任何事件**的报道。"""
+async def load_candidates(
+    db: Database,
+    *,
+    days: int,
+    now: datetime | None = None,
+    editorial: EditorialSection | None = None,
+) -> list[Candidate]:
+    """读取最近 `days` 天内已入库、且**尚未归入任何事件**的报道。
+
+    传入 `editorial` 时同时定信源分级与社区标记。**不能在这里偷懒写成默认值**：
+    分级决定入选门槛、社区标记决定"算不算独立来源"，两者错了整条链路的结论都会错
+    （所有来源都被当成 T2、社区讨论被当成编辑类来源，热度与精选都会失真）。
+    """
     moment = now or datetime.now(UTC)
     since = moment - timedelta(days=days)
     async with db.session() as session:
@@ -436,6 +563,7 @@ async def load_candidates(db: Database, *, days: int, now: datetime | None = Non
                 .order_by(NewsItem.id)
             )
         ).all()
+    config = editorial
     return [
         Candidate(
             news_item_id=row.id,
@@ -444,6 +572,8 @@ async def load_candidates(db: Database, *, days: int, now: datetime | None = Non
             source=row.source or "",
             url=row.url or "",
             published_at=row.published_at,
+            tier=config.tier_of(row.source or "", row.url or "") if config else "T2",
+            editorial=not config.is_community(row.url or "") if config else True,
         )
         for row in rows
     ]

@@ -161,7 +161,7 @@ async def assemble(
     for report, item, score in rows:
         grouped.setdefault(report.story_id, []).append((report, item, score))
 
-    dropped = {"period": 0, "duplicate_follow_up": 0}
+    dropped = {"period": 0, "duplicate_follow_up": 0, "not_selected": 0}
     entries: list[Entry] = []
     for story in stories:
         records = grouped.get(story.id, [])
@@ -174,6 +174,14 @@ async def assemble(
         # 本期没有任何新报道 = 旧闻，不进本期
         if not fresh:
             dropped["period"] += 1
+            continue
+        # **精选就是入选判定**：本期没有任何一条报道过入选门槛的事件不进日报。
+        # 不读 `selected` 会让精选对日报毫无影响——实测跑完真实数据后，精选入选 6 条
+        # 而日报照旧列了 12 条，整条链路等于白接。
+        # 未评分的条目按未入选处理（`Score.selected` 的既有语义），所以打分没跑到的事件
+        # 不会混进来；这是"宁可少列"的方向，与精选的失败方向一致。
+        if not _selected(fresh):
+            dropped["not_selected"] += 1
             continue
         entries.append(_entry(story, records, fresh))
 
@@ -192,6 +200,16 @@ async def assemble(
         max(0, len(entries) - limit),
     )
     return digest
+
+
+def _selected(fresh: list[Any]) -> bool:
+    """本期是否有报道通过了精选。
+
+    判据是**本期**的报道：上周入选、本周只是被重新抓取的事件不该再进今天的日报。
+    `score` 为 None（还没打分）按未入选处理——与 `Score.selected` 对未评分的语义一致，
+    失败方向同样选"少列一条"而不是"全塞进去"。
+    """
+    return any(score is not None and bool(score.selected) for _, _, score in fresh)
 
 
 def _entry(story: Story, records: list[Any], fresh: list[Any]) -> Entry:

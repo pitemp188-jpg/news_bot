@@ -10,7 +10,7 @@ from pathlib import Path
 
 from newsbot.core.db import Database
 from newsbot.core.models import Schedule
-from newsbot.dispatcher.scheduler import Scheduler, job_id
+from newsbot.dispatcher.scheduler import REFRESH_JOB_ID, Scheduler, job_id
 
 
 async def _make_db(tmp_path: Path) -> Database:
@@ -125,5 +125,88 @@ async def test_start_and_shutdown(tmp_path: Path) -> None:
         assert scheduler._scheduler.running
         await scheduler.shutdown()
         assert not scheduler._scheduler.running
+    finally:
+        await db.dispose()
+
+
+# ── 事件层刷新 ──
+
+
+async def test_sync_registers_refresh_job_without_any_schedule(tmp_path: Path) -> None:
+    """刷新作业与订阅无关：一个订阅都没有时也要挂上，到点自己跑。"""
+    db = await _make_db(tmp_path)
+    try:
+        calls: list[int] = []
+
+        async def refresh() -> None:
+            calls.append(1)
+
+        _, submit = _collector()
+        scheduler = Scheduler(db, timezone="Asia/Shanghai", submit=submit, refresh=refresh, refresh_interval=30)
+        await scheduler.sync()
+        assert scheduler.job_ids() == {REFRESH_JOB_ID}
+        job = scheduler._scheduler.get_job(REFRESH_JOB_ID)
+        assert job is not None and str(job.trigger) == "interval[0:30:00]"
+    finally:
+        await db.dispose()
+
+
+async def test_sync_omits_refresh_job_when_interval_disabled(tmp_path: Path) -> None:
+    """间隔配成 0（或没接回调）时不挂作业，也不能留下上一次同步的僵尸作业。"""
+    db = await _make_db(tmp_path)
+    try:
+
+        async def refresh() -> None:  # pragma: no cover — 不该被调用
+            raise AssertionError("间隔为 0 时不应触发刷新")
+
+        _, submit = _collector()
+        on = Scheduler(db, timezone="Asia/Shanghai", submit=submit, refresh=refresh, refresh_interval=30)
+        await on.sync()
+        assert on.job_ids() == {REFRESH_JOB_ID}
+
+        off = Scheduler(db, timezone="Asia/Shanghai", submit=submit, refresh=refresh, refresh_interval=0)
+        await off.sync()
+        assert off.job_ids() == set()
+    finally:
+        await db.dispose()
+
+
+async def test_run_refresh_calls_back(tmp_path: Path) -> None:
+    db = await _make_db(tmp_path)
+    try:
+        calls: list[int] = []
+
+        async def refresh() -> None:
+            calls.append(1)
+
+        _, submit = _collector()
+        scheduler = Scheduler(db, timezone="Asia/Shanghai", submit=submit, refresh=refresh, refresh_interval=30)
+        await scheduler.run_refresh()
+        assert calls == [1]
+    finally:
+        await db.dispose()
+
+
+async def test_run_refresh_swallows_failure(tmp_path: Path) -> None:
+    """刷新会真的调模型和数据库，失败是常态；异常必须烂在这一层，否则调度循环会停。"""
+    db = await _make_db(tmp_path)
+    try:
+
+        async def refresh() -> None:
+            raise RuntimeError("模型挂了")
+
+        _, submit = _collector()
+        scheduler = Scheduler(db, timezone="Asia/Shanghai", submit=submit, refresh=refresh, refresh_interval=30)
+        await scheduler.run_refresh()  # 不抛就算过
+    finally:
+        await db.dispose()
+
+
+async def test_run_refresh_without_callback_is_noop(tmp_path: Path) -> None:
+    db = await _make_db(tmp_path)
+    try:
+        _, submit = _collector()
+        scheduler = Scheduler(db, timezone="Asia/Shanghai", submit=submit)
+        await scheduler.run_refresh()
     finally:
         await db.dispose()

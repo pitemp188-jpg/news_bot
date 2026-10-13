@@ -23,6 +23,7 @@ from newsbot.core.db import Database
 from newsbot.core.llm import LLM, OpenAIClient
 from newsbot.core.log import get_logger
 from newsbot.core.models import Schedule
+from newsbot.dispatcher.events import refresh as refresh_events
 from newsbot.dispatcher.pipeline import Pipeline
 from newsbot.dispatcher.queue import TaskQueue
 from newsbot.dispatcher.scheduler import Scheduler, cron_from_time
@@ -130,7 +131,13 @@ class App:
         )
         router.set_inbound(self._on_message)
 
-        scheduler = self.scheduler = Scheduler(db, timezone=config.app.timezone, submit=self._submit_schedule)
+        scheduler = self.scheduler = Scheduler(
+            db,
+            timezone=config.app.timezone,
+            submit=self._submit_schedule,
+            refresh=self._refresh_events,
+            refresh_interval=config.editorial.refresh_interval_minutes,
+        )
         await scheduler.sync()
         scheduler.start()
 
@@ -217,6 +224,14 @@ class App:
         topics = [str(topic) for topic in (row.topics or [])] or ["AI"]
         query = "；".join(SCHEDULED_QUERY.format(topic=topic) for topic in topics[:3])
         await self.queue.submit(kind="scheduled", query=query, platform=row.platform, chat_id=row.chat_id)
+
+    async def _refresh_events(self) -> None:
+        """定时刷新事件层，让网页看到的是最近聚簇 / 精选的结果。"""
+        assert self.db is not None
+        llm = self._llm or OpenAIClient(self._config.secrets)
+        self._llm = llm
+        stats = await refresh_events(self.db, llm, editorial=self._config.editorial)
+        logger.info("事件层定时刷新：%s", stats.line())
 
     # ── 主动推送（notify） ──
     async def notify(self, text: str, *, platform: str | None = None, chat_id: str | None = None) -> bool:
