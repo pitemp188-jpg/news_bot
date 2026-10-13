@@ -9,6 +9,10 @@
 # 自身的无限重连负责（那里已不存在"超过 N 次就放弃"的分支），这里不重复实现，
 # 否则两处状态判断会互相打架。
 #
+# 拉起的是 `python -m newsbot api` 而不是 `run`：`api` 是 `run` 的超集，一个进程
+# 同时提供机器人与网页。**绝不可两个都起**——两个进程会各挂一个 30 分钟事件层刷新
+# 作业（实测撞出 story_score 唯一约束冲突、整批评分丢失），还会互抢同一个 QQ 会话。
+#
 # 用法：
 #   pwsh -File scripts/watchdog.ps1              # 常驻看护，每 60s 检查一次
 #   pwsh -File scripts/watchdog.ps1 -Once        # 只检查一次（可交给计划任务定时调用）
@@ -39,12 +43,16 @@ function Write-Log([string]$Message) {
 }
 
 function Get-ServiceProcess {
-    # 用 -m newsbot run 匹配：命令行的其余部分会随解释器路径变化，不可依赖。
+    # 用 -m newsbot api 匹配：`api` 是 `run` 的**超集**——一个进程同时提供机器人和网页,
+    # 所以看护要拉起的是它。之所以不能两个都起：两个进程会各挂一个 30 分钟事件层刷新
+    # 作业（实测撞出 `UNIQUE constraint failed: story_score.news_item_id`、整批评分丢失）,
+    # 还会互抢同一个 QQ 会话。
+    # 命令行的其余部分会随解释器路径变化，不可依赖。
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
             $_.CommandLine -and
             ($_.CommandLine -match 'newsbot') -and
-            ($_.CommandLine -match '-m\s+newsbot\s+run')
+            ($_.CommandLine -match '-m\s+newsbot\s+api')
         }
 }
 
@@ -66,7 +74,7 @@ function Start-Service {
     # 独立控制台 + Hidden：不依附当前终端，关掉终端/编辑器也不受影响。
     # 标准输出另写一个文件，避免和 app 自己的 newsbot.log 抢同一个句柄。
     Start-Process -FilePath $uv.Source `
-        -ArgumentList 'run', 'python', '-m', 'newsbot', 'run' `
+        -ArgumentList 'run', 'python', '-m', 'newsbot', 'api' `
         -WorkingDirectory $RootDir `
         -WindowStyle Hidden `
         -RedirectStandardOutput $consoleLog `
