@@ -29,10 +29,10 @@
 
 | 状态 | 编号 | 任务 | 产出 | 验收标准 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| [~] | T2.1 | 移植调研 | `docs/08-porting.md` 第 3、4、7 节（已完成）、`THIRD_PARTY_NOTICES.md`（待建） | 锁定 hermes commit；协议、依赖、取舍已写清 | M1 |
-| [ ] | T2.2 | 适配器基类 | `gateway/base.py`、`tests/fakes/adapter.py` | 按 08 第 4.2 节契约实现；`split_text` 保持代码块完整；去重 TTL 生效；FakeAdapter 可收发 | T2.1 |
-| [ ] | T2.3 | QQ 适配器 | `gateway/qqbot.py`、`tests/fakes/qq_gateway.py` | token 提前刷新；Hello→Identify→READY→心跳→断线 Resume；08 第 3.3 节全部关闭码分支有测试；`live` 测试确认主动消息额度 | T2.2 |
-| [ ] | T2.4 | 微信适配器 | `gateway/weixin.py`、`login` 子命令 | 扫码登录；游标与 context_token 持久化到 `data/weixin/`；-14 / -2 / 限流熔断分支有测试；`live` 测试手动通过 | T2.2 |
+| [x] | T2.1 | 移植调研 | `docs/08-porting.md` 第 3、4、7 节（已完成）、`THIRD_PARTY_NOTICES.md` | 锁定 hermes commit；协议、依赖、取舍已写清 | M1 |
+| [x] | T2.2 | 适配器基类 | `gateway/base.py`、`tests/fakes/adapter.py` | 按 08 第 4.2 节契约实现；`split_text` 保持代码块完整；去重 TTL 生效；FakeAdapter 可收发 | T2.1 |
+| [x] | T2.3 | QQ 适配器 | `gateway/qqbot.py`、`tests/fakes/qq_gateway.py` | token 提前刷新；Hello→Identify→READY→心跳→断线 Resume；08 第 3.3 节全部关闭码分支有测试；`live` 测试确认主动消息额度 | T2.2 |
+| [x] | T2.4 | 微信适配器 | `gateway/weixin.py`、`login` 子命令 | 扫码登录；游标与 context_token 持久化到 `data/weixin/`；-14 / -2 / 限流熔断分支有测试；`live` 测试手动通过 | T2.2 |
 | [x] | T2.5 | 鉴权 | `gateway/auth.py` | 白名单 + 配对码；未授权消息忽略并记录 | T2.2 |
 | [x] | T2.6 | 路由与投递 | `gateway/router.py` | 入站→鉴权→指令/任务；出站分段、重试 3 次、写 `delivery` 表；`need_user` 时记 `waiting_user` 并在用户下次发消息时补投；主通道失败切备用通道 | T2.5 |
 
