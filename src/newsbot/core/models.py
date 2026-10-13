@@ -143,6 +143,11 @@ class Story(Base):
     title: Mapped[str] = mapped_column(Text, default="")
     # 综述：由模型在归组后写，事件页与日报复用；为空表示还没写
     digest: Mapped[str | None] = mapped_column(Text, default=None)
+    # 写上面那句综述时，这个事件已经有多少条报道。它让"综述是否过期"成为**可判定**的：
+    # 新报道到来后 `len(reports) > digest_reports`，才重写一次。不存这个数就只剩两种
+    # 坏选择——要么永不更新（长期事件永远描述着最初那两家），要么每次刷新都重写
+    # （白花钱，且同一件事的措辞每半小时变一次）。
+    digest_reports: Mapped[int] = mapped_column(default=0)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     # 人工改过的归属不允许被后续自动归组覆盖（AIHOT 的约定，避免"改完又被改回去"）

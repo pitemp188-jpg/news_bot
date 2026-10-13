@@ -22,6 +22,7 @@ from newsbot.agent.tools.base import Source, ToolResult
 from newsbot.core.config import AgentSection, FeedSource, Secrets, default_feeds
 from newsbot.core.errors import RetriableError
 from newsbot.core.log import get_logger
+from newsbot.core.quality import LISTING_TITLE
 
 logger = get_logger(__name__)
 
@@ -75,6 +76,12 @@ _LOW_QUALITY = re.compile(
 # 提炼检索词是 Agent 规划阶段的职责；工具猜不了的（猜中了也解释不清为什么），
 # 一旦工具替模型猜，模型就收不到"检索词没写好"的反馈，规划能力永远长不出来。
 _TOKEN_SPLIT = re.compile(r"\s+|[，。！？、；：（）「」【】《》,.!?;:()\[\]\"'“”‘’]+")
+
+
+# 栏目页 / 首页：RSS 里常混进一条"频道自己"的条目，判据见 `core.quality`——
+# 那里说明了为什么这样切、以及实测的召回与误伤。这里补一条 RSS 才有的更强判据：
+# **与频道标题逐字相同**（最精确，不会误伤文章标题，见 `_channel_title`）。
+_INDEX_PAGE = LISTING_TITLE  # 判据与实测依据见 core.quality
 
 
 def _unwrap(url: str) -> str:
@@ -198,6 +205,23 @@ def clean_snippet(text: str) -> str:
     return cleaned if len(cleaned) >= MIN_SNIPPET_CHARS else ""
 
 
+def _channel_title(text: str, *, is_rss: bool) -> str:
+    """取订阅源的频道标题（RSS 的 `<channel><title>` / Atom 的 `<feed><title>`）。
+
+    用途是识别"频道自己"那条条目：它与频道标题**逐字相同**，是最精确的判据
+    （比关键词猜测可靠，不会误伤正常的文章标题）。
+    """
+    scope = text.split("</channel>", 1)[0] if is_rss else text.split("<entry", 1)[0]
+    return _tag(scope, "title").strip().lower()
+
+
+def _is_index_page(title: str, channel: str) -> bool:
+    """是否是源首页/栏目页而不是文章。"""
+    if channel and title.strip().lower() == channel:
+        return True
+    return _INDEX_PAGE.search(title.strip()) is not None
+
+
 def parse_feed(text: str, source: str) -> list[dict[str, str]]:
     """解析 RSS 2.0 与 Atom，产出统一结构；纯函数，便于离线测试。
 
@@ -205,6 +229,7 @@ def parse_feed(text: str, source: str) -> list[dict[str, str]]:
     """
     is_rss = bool(_RSS_ITEM.search(text))
     blocks = _RSS_ITEM.findall(text) if is_rss else _ATOM_ENTRY.findall(text)
+    channel = _channel_title(text, is_rss=is_rss)
     items: list[dict[str, str]] = []
     for block in blocks:
         url = _tidy_url(_tag(block, "link") if is_rss else _atom_link(block))
@@ -214,10 +239,13 @@ def parse_feed(text: str, source: str) -> list[dict[str, str]]:
         # 导购/营销内容不是资讯：留着只会挤掉真正的内容（实测 Wired 的 feed 里占六成）
         if _LOW_QUALITY.search(title):
             continue
+        # 栏目页/首页同理：不是文章，混进来会挤掉真内容还会被当成"同一件事"
+        if _is_index_page(title, channel):
+            continue
         summary = _tag(block, "description") or _tag(block, "summary") or _tag(block, "content")
         items.append(
             {
-                "title": _tag(block, "title") or url,
+                "title": title,
                 "url": url,
                 "snippet": clean_snippet(summary)[:SNIPPET_OUTPUT_CHARS],
                 "published": _published(block),

@@ -32,6 +32,7 @@ news_bot/
 │   │   ├── log.py               # 日志与脱敏
 │   │   ├── db.py                # 引擎与会话
 │   │   ├── models.py            # 全部 ORM 模型
+│   │   ├── quality.py           # 来源质量：列表页 / 搜索页不是文章（agent 与 dispatcher 共用）
 │   │   ├── errors.py            # 错误类型
 │   │   └── llm.py               # LLM 客户端（agent 与 result 共用）
 │   ├── gateway/
@@ -44,7 +45,8 @@ news_bot/
 │   ├── dispatcher/
 │   │   ├── queue.py             # 任务队列、worker、超时重试取消、恢复
 │   │   ├── session.py           # 会话上下文
-│   │   ├── scheduler.py         # 定时调度
+│   │   ├── scheduler.py         # 定时调度（订阅作业 + 事件层刷新作业）
+│   │   ├── events.py            # 事件层刷新：聚簇未归组资讯 → 两轮打分精选 → 逐小时热度快照
 │   │   └── pipeline.py          # 执行流水线 agent→result→send
 │   ├── agent/
 │   │   ├── runner.py            # 规划循环
@@ -59,8 +61,9 @@ news_bot/
 │   │   ├── dedup.py             # 词法 + 语义去重（同事件只留一条）
 │   │   ├── hot.py               # 事件热度：48h 窗口 / 24h 半衰期 / 独立参与者
 │   │   ├── cluster.py           # 事件聚簇：预筛配对 → 模型判定 → 复核 → 落 story/report_item
+│   │   ├── summarize.py         # 事件综述：只为多来源事件写，顺带把原标题改成中文短句
 │   │   ├── digest.py            # 日报/周报/月报编排：一个事件一条，纯规则组装不调模型
-│   │   ├── selection.py         # 精选：同一标准两轮打分 + 信源分级门槛
+│   │   ├── board.py             # 事件层的聊天呈现：热度榜 / 日报渲染成可推送文本
 │   │   └── report.py
 │   └── api/
 │       ├── server.py            # FastAPI 应用、登录、静态资源托管

@@ -119,12 +119,62 @@ class EditorialSection(BaseModel):
     # 聚簇只看最近这么多天的资讯。两周：再早的报道与今天的内容几乎不可能同属一件事，
     # 放进候选只是把模型输入撑大
     cluster_days: int = 14
-    # 候选预筛的词集相似度下限。**故意远低于判重阈值 0.6**：这一步是"选谁去问模型"，
-    # 目的在召回而不是精确——漏掉的配对模型永远看不到，而多问几对只是多花点 token
-    cluster_pair_floor: float = 0.08
-    # 一次聚簇最多让模型看多少对候选
-    cluster_max_pairs: int = 60
-    cluster_timeout_seconds: float = 120.0
+    # 候选预筛的词集相似度下限。实测依据（158 条真实资讯两两比对，12403 对）：
+    #   0.08 → 215 对，0.12 → 57，0.15 → 28，0.20 → 13
+    # 而 0.12～0.25 这一段的配对**逐条看过，全是噪声**（「Best Battery Leaf Blowers」对
+    # 「Power Supply Solutions」、「Elon Musk 攻击 Ambani」对「Musk 的中期选举开支」）。
+    # 0.08 等于把九成模型调用烧在噪声上——实测 19 批判定里 5 批返回空正文、其余清一色
+    # different。取 0.15：调用量降到约四分之一，同时留出召回余量。**最终判定仍是模型**，
+    # 多问几对的代价只是 token，而漏问会让同一件事裂成两条各自进日报。
+    cluster_pair_floor: float = 0.15
+    # 一次让模型看多少对配对。**这是"每次调用"的批量，不是总量上限**：实测一批给
+    # 60 对会让推理把输出额度吃光、返回空正文（63 秒后拿到空字符串）。分批后每批
+    # 推理量变小，正文能正常产出，而且全部配对都判得到——不会像截断那样静默丢掉大部分
+    cluster_max_pairs: int = 8
+    # 配对判定的输出上限。**必须给足**：这个端点是推理模型，推理与正文共用额度，
+    # 实测 12 对配对就让推理烧掉整整 4000 token（日志 completion=4000、正文为空）。
+    # 上限给小了的后果不是"答案短"而是"完全没有答案"；它只是上限，不会白花钱
+    cluster_max_tokens: int = 16000
+    # 配对判定的单批超时。**必须跟着输出上限一起调**：上限提到 16000 后模型有机会
+    # 真的写完推理，单批实测从数十秒涨到两分钟以上——实测 120 秒会让整批超时丢结论，
+    # 而"丢结论"会连锁触发"先合并、再被复核拆开"的无谓往返
+    cluster_timeout_seconds: float = 240.0
+    # 配对总数上限（成本兜底）。超出的部分**按预筛相似度从高到低**保留：
+    # 最像的配对优先送进模型，而不是按编号顺序碰运气
+    cluster_pair_budget: int = 300
+    # 事件层刷新周期（分钟）。聚簇与两轮打分都是模型调用，成本随资讯量增长，
+    # 0 表示关闭自动刷新（只保留手动 `python -m newsbot events`）
+    refresh_interval_minutes: int = 30
+    # 一次刷新最多给多少条报道打分。逐条两次调用 = 2 倍成本，条数必须有上限
+    refresh_max_scores: int = 24
+    # 一次刷新最多为多少个事件写综述。只在**多来源**事件且上一位综述已过期时才写，
+    # 所以常态下这个上限很少触顶；触顶时优先处理"新报道攒得最多"的那些
+    refresh_max_summaries: int = 12
+    # 综述的输出上限。**必须给足**：这个端点是推理模型，推理与正文共用额度，
+    # 上限给小了的后果不是"写得短"而是"完全没有内容"——实测同一个端点在上限 4000
+    # 时返回过空正文（聚簇那边已因此踩过一次）。它只是上限，不会白花钱
+    summary_max_tokens: int = 8000
+    # 综述的单条超时。跟着输出上限走：上限提到 8000 后模型有机会真的写完推理
+    summary_timeout_seconds: float = 150.0
+
+    def tier_of(self, source: str, url: str) -> str:
+        """按来源域名判信源分级；不在名单里一律 T2。
+
+        用"是否在名单里"而不是猜测：把自己不认识的来源判成官方，等于替读者做了
+        "这条更可信"的背书，而背书必须有据可依。
+        """
+        host = _host_of(source) or _host_of(url)
+        if not host:
+            return "T2"
+        if _matches(host, self.official_domains):
+            return "T1"
+        if _matches(host, self.quasi_official_domains):
+            return "T1_5"
+        return "T2"
+
+    def is_community(self, url: str) -> bool:
+        """是否社区来源：讨论算热度，但不计入独立来源数。"""
+        return _matches(_host_of(url), self.community_domains)
 
 
 class FeedSource(BaseModel):
@@ -141,7 +191,30 @@ class FeedSource(BaseModel):
 
 
 def _host_of(url: str) -> str:
-    return url.split("//")[-1].split("/")[0].removeprefix("www.")
+    """取出主机名。同时接受网址与纯域名（`openai.com`），都去掉 `www.`。
+
+    来源字段里两种写法都实测出现过：订阅源给域名，搜索结果给完整网址。
+    """
+    text = (url or "").strip().lower()
+    if not text:
+        return ""
+    if "//" in text:
+        text = text.split("//", 1)[1]
+    return text.split("/", 1)[0].split("@")[-1].split(":", 1)[0].removeprefix("www.")
+
+
+def _matches(host: str, domains: list[str]) -> bool:
+    """主机名是否命中域名名单；子域名算命中，**不做子串匹配**。
+
+    `notopenai.com` 不能因为包含 `openai.com` 就被当成官方——域名边界必须显式判断。
+    """
+    if not host:
+        return False
+    for raw in domains:
+        domain = _host_of(raw)
+        if domain and (host == domain or host.endswith(f".{domain}")):
+            return True
+    return False
 
 
 def default_feeds() -> list[FeedSource]:

@@ -81,17 +81,37 @@ def test_parse_vetoes_ignores_out_of_range() -> None:
 
 
 def test_candidate_pairs_keeps_shared_identifier() -> None:
-    """共带数字的标识符是唯一能跨中英文对齐同一件事的词法证据，必须直接入选。"""
-    left = _candidate(1, "Qwen-Image 2.1 Turbo 发布", source="qbitai")
-    right = _candidate(2, "阿里发布 qwen-image-2.1-turbo 模型", source="venturebeat")
+    """共带的**具体**标识符是唯一能跨中英文对齐同一件事的词法证据，必须直接入选。
+
+    取自真实语料的那对同题报道：中文标题只剩产品名，与英文标题的普通词零重合，
+    `floor=0.9` 把词集相似度那条路径也堵掉了（实测两者 jaccard 仅约 0.05），
+    所以能配对只可能来自共享标识符。
+    """
+    left = _candidate(1, "Microsoft AI Releases Microsoft-Decision-1: A Qwen3.5-9B Decision-Scoring Model")
+    right = _candidate(2, "微软在 Qwen 模型基础上推出决策模型 Microsoft-Decision-1")
     assert cl.candidate_pairs([left, right], floor=0.9) == [(1, 2)]
 
 
-def test_candidate_pairs_drops_unrelated_titles() -> None:
-    """预筛阈值虽低，但毫无交集的标题仍要被挡掉——否则模型要看的配对会爆炸。"""
-    left = _candidate(1, "苹果定档秋季发布会", source="ifanr")
-    right = _candidate(2, "三星减产存储芯片", source="solidot")
-    assert cl.candidate_pairs([left, right], floor=0.08) == []
+def test_candidate_pairs_ignores_short_numeric_fragments() -> None:
+    """`2.1`、`1000` 这类短碎片没有识别力，必须在预筛就被挡掉。
+
+    实测假阳性：两个都在讲某模型 2.1，却是两家公司两件事。它们不只白费一次模型调用，
+    还会把无关条目塞进同一批判定，让模型在噪声里找信号。
+    """
+    left = _candidate(1, "JetBrains Releases Mellum2.1")
+    right = _candidate(2, "Nano Banana 终于 2.1 了")
+    assert cl.candidate_pairs([left, right], floor=0.9) == []
+
+
+def test_candidate_pairs_keeps_cross_language_pair_at_real_floor() -> None:
+    """预筛收紧后召回不能掉：中英同题的配对要能在**出厂阈值**下照旧入选。
+
+    上面那条短碎片规则会把 `2.1` 从证据里剔除，而这对报道的中文标题恰好只留下 `2.1`
+    ——但它靠词集相似度（约 0.5）稳稳高于出厂阈值，所以收紧阈值不等于丢召回。
+    """
+    left = _candidate(1, "Qwen-Image 2.1 Turbo 发布", source="qbitai")
+    right = _candidate(2, "阿里发布 qwen-image-2.1-turbo 模型", source="venturebeat")
+    assert cl.candidate_pairs([left, right], floor=0.15) == [(1, 2)]
 
 
 def test_candidate_pairs_matches_on_summary_text() -> None:
@@ -358,4 +378,133 @@ async def test_load_candidates_uses_the_stored_summary(tmp_path: Any) -> None:
     await _seed(db, title="标题看不出关联", url="https://a.example/1")
     loaded = await cl.load_candidates(db, days=14, now=NOW)
     assert loaded[0].text == "性能提升三成"
+    await db.dispose()
+
+
+# ── 分批与覆盖面（真实跑出来的两个问题） ──
+
+
+def test_parse_relations_tolerates_markdown_wrapping() -> None:
+    """实测模型很自然地把结论写成 `- 1,2,same` 或带反引号；不兼容就会一条都解析不出。"""
+    assert cl.parse_relations("- 1,2,same", {1, 2}) == {(1, 2): cl.REL_SAME}
+    assert cl.parse_relations("`3,4,follow_up`", {3, 4}) == {(3, 4): cl.REL_FOLLOW_UP}
+    assert cl.parse_relations("* 5,6,different.", {5, 6}) == {(5, 6): cl.REL_DIFFERENT}
+
+
+def test_parse_relations_ignores_the_example_from_the_prompt() -> None:
+    """提示词里带了 `1,3,same` 这个示例，模型偶尔会照抄；编号校验要能挡掉。"""
+    assert cl.parse_relations("1,3,same", {5, 6}) == {}
+
+
+def test_summarise_counts_each_relation() -> None:
+    text = cl.summarise({(1, 2): cl.REL_SAME, (3, 4): cl.REL_SAME, (5, 6): cl.REL_FOLLOW_UP})
+    assert "same 2" in text
+    assert "follow_up 1" in text
+
+
+def test_candidate_pairs_returns_the_most_similar_first() -> None:
+    """配对超预算时砍的是队尾，所以最像的必须排在最前。"""
+    weak = [
+        _candidate(1, "苹果发布新款芯片 采用新工艺", source="a.com"),
+        _candidate(2, "台积电扩产 芯片产能提升", source="b.com"),
+    ]
+    strong = [_candidate(3, "Qwen-Image 2.1 Turbo 发布"), _candidate(4, "阿里发布 qwen-image-2.1-turbo")]
+    pairs = cl.candidate_pairs(weak + strong, floor=0.05)
+    assert pairs[0] == (3, 4), "带标识符的那对相似度最高，必须排第一"
+
+
+def test_effective_merges_when_coverage_is_high() -> None:
+    relations = {(1, 2): cl.REL_SAME, (1, 3): cl.REL_SAME}
+    merged = cl._effective(relations, [(1, 2), (1, 3), (2, 3)])
+    assert merged[(2, 3)] == cl.REL_SAME, "只差一对结论时按「不确定就合并」处理"
+
+
+def test_effective_does_not_merge_when_coverage_is_low() -> None:
+    """多数批次失败时，从未问过模型的配对**不能**被当成同一件事——那会凭空造出巨大事件。"""
+    relations = {(1, 2): cl.REL_SAME}
+    merged = cl._effective(relations, [(1, 2), (3, 4), (5, 6), (7, 8)])
+    assert (3, 4) not in merged
+    assert (5, 6) not in merged
+    assert merged[(1, 2)] == cl.REL_SAME
+
+
+def test_effective_returns_nothing_without_conclusions() -> None:
+    assert cl._effective({}, [(1, 2)]) == {}
+
+
+async def test_assign_judges_every_pair_across_batches() -> None:
+    """分批判定：每批只问一对，三批都要问到，且结论都生效。"""
+    llm = FakeLLM(replies=[reply("1,3,same"), reply("1,2,same"), reply("2,3,same")])
+    config = EditorialSection(cluster_max_pairs=1)
+    items = [
+        _candidate(1, "Qwen-Image 2.1 Turbo 发布"),
+        _candidate(2, "阿里发布 qwen-image-2.1-turbo"),
+        _candidate(3, "Qwen-Image 2.1 Turbo 更新"),
+    ]
+    plan = await cl.Clusterer(llm, config).assign(items)
+    assert len(llm.calls) >= 2, "配对要分批交给模型，不是一次全塞进去"
+    assert len(plan.clusters) == 1, "三批的结论合起来应把三条并成一件事"
+
+
+async def test_assign_survives_a_failed_batch() -> None:
+    """单批失败只影响那一批：其余批次照常生效，其余配对按不确定处理。"""
+
+    class Flaky(FakeLLM):
+        async def complete(self, messages: Any, tools: Any = None, *, max_tokens: Any = None) -> Any:
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                raise RuntimeError("这一批超时了")
+            return reply("2,3,different")
+
+    config = EditorialSection(cluster_max_pairs=1)
+    items = [
+        _candidate(1, "Qwen-Image 2.1 Turbo 发布"),
+        _candidate(2, "阿里发布 qwen-image-2.1-turbo"),
+        _candidate(3, "Qwen-Image 2.1 Turbo 更新"),
+    ]
+    plan = await cl.Clusterer(Flaky(), config).assign(items)
+    assert sum(len(cluster.members) for cluster in plan.clusters) == 3, "三条都不能丢"
+
+
+async def test_assign_logs_when_the_model_returns_empty_content() -> None:
+    """空正文是这个端点的典型故障（推理吃光输出额度），必须留下可判断的证据。"""
+    llm = FakeLLM(replies=[reply("")])
+    plan = await cl.Clusterer(llm, EditorialSection(cluster_max_pairs=1)).assign(
+        [_candidate(1, "Qwen-Image 2.1 Turbo"), _candidate(2, "qwen-image-2.1-turbo")]
+    )
+    assert sum(len(cluster.members) for cluster in plan.clusters) == 2, "拿不到结论就不合并"
+
+
+async def test_story_timestamps_match_its_report_rows(tmp_path: Any) -> None:
+    """事件的时间口径必须与逐条报道同一把尺子。
+
+    回归用例：`last_seen_at` 曾按 `published_at` 算，而详情页逐行显示的是
+    `observed_at`；发布时间为空的条目在 `observed_at` 上会回退成写入时刻，于是头部写
+    「最新进展 10月12日 14:44」、底下那条报道却是「10月13日 11:24」，同一个事件自相
+    矛盾。改为从实际落库的报道推导后，一致性由构造保证。
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'cluster-time.db'}")
+    await db.prepare()
+    # 一条有发布时间（旧），一条**没有**发布时间（observed_at 会回退成写入时刻）
+    published = await _seed(db, title="有日期的一手", url="https://a.example/1", hours=20)
+    async with db.session() as session:
+        bare = NewsItem(url="https://b.example/2", url_hash="https://b.example/2", title="没有日期的后续")
+        session.add(bare)
+        await session.commit()
+        bare_id = bare.id
+    items = [
+        cl.Candidate(news_item_id=published, title="有日期的一手", source="量子位"),
+        cl.Candidate(news_item_id=bare_id, title="没有日期的后续", source="infoq"),
+    ]
+    await cl.write_plan(db, await _plan([published, bare_id]), items)
+
+    async with db.session() as session:
+        story = (await session.scalars(select(Story))).one()
+        rows = (await session.scalars(select(ReportItem).where(ReportItem.story_id == story.id))).all()
+    moments = [row.observed_at if row.observed_at.tzinfo else row.observed_at.replace(tzinfo=UTC) for row in rows]
+    assert story.last_seen_at is not None and story.first_seen_at is not None
+    seen = story.last_seen_at if story.last_seen_at.tzinfo else story.last_seen_at.replace(tzinfo=UTC)
+    first_seen = story.first_seen_at if story.first_seen_at.tzinfo else story.first_seen_at.replace(tzinfo=UTC)
+    assert abs((seen - max(moments)).total_seconds()) < 1, "头部「最新进展」要与最新那条报道一致"
+    assert abs((first_seen - min(moments)).total_seconds()) < 1, "「首次出现」同理"
     await db.dispose()

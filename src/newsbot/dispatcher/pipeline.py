@@ -18,7 +18,9 @@ from newsbot.core.db import Database
 from newsbot.core.errors import RetriableError
 from newsbot.core.log import get_logger
 from newsbot.core.models import LlmUsage, NewsItem, Report, Task
+from newsbot.core.quality import is_listing
 from newsbot.dispatcher.session import SessionStore
+from newsbot.result import board
 from newsbot.result.dedup import Deduper, Item, content_digest, simhash64, simhash_hex, url_digest
 
 logger = get_logger(__name__)
@@ -108,6 +110,7 @@ class Pipeline:
         sessions: SessionStore,
         deduper: DeduperFactory | None = None,
         remember: bool = True,
+        timezone: str = board.DEFAULT_TIMEZONE,
     ) -> None:
         self._db = db
         self._runner = runner
@@ -116,9 +119,28 @@ class Pipeline:
         self._sessions = sessions
         self._deduper = deduper
         self._remember = remember
+        # 事件层呈现的表头时刻要按这个时区渲染，不能按宿主时区（见 result.digest._local）
+        self._timezone = timezone
 
     async def execute(self, session: AsyncSession, task: Task) -> str | None:
-        """执行任务；投递失败按可重试处理，其余错误向上抛给队列分类。"""
+        """执行任务；投递失败按可重试处理，其余错误向上抛给队列分类。
+
+        `kind` 属于事件层呈现类型（`board.BOARD_KINDS`）时**完全不走 Agent**：那类
+        任务要的是"我们**已经**追踪到的事件的榜单"，而不是再去现搜一遍。走 Agent
+        会重新引入事件层本来要解决的问题——查询时间不对、来源重复、去重还会删掉正文
+        引用过的编号。它们也不需要历史去重与用量落库（零模型调用）。
+        """
+        if task.kind in board.BOARD_KINDS:
+            content = await board.render(self._db, task.kind, timezone=self._timezone)
+            report = Report(task_id=task.id, content=content, sources=[])
+            session.add(report)
+            await session.commit()
+            if task.platform and task.chat_id:
+                await self._deliver(task, content, report.id)
+            else:
+                logger.info("任务 #%d 无投递目标，仅生成报告", task.id)
+            return content
+
         history = await self._history(task)
         findings = await self._runner.run(task.query, history)
         # 去重放在用量落库之前：语义分组会产生一次模型调用，它的用量也要进 llm_usage
@@ -232,7 +254,19 @@ class Pipeline:
         # 这里只留日志，便于排查"为什么这条没列出来"。
 
     async def _store_sources(self, sources: list[dict[str, str]]) -> None:
-        """把新来源写入资讯库，供后续任务复用与去重。"""
+        """把新来源写入资讯库，供后续任务复用、聚簇与去重。
+
+        **列表页 / 搜索页不入库**：Agent 为了找线索会去抓 GitHub Trending、财经频道、
+        搜索结果页，那些页面一旦入库就会变成"报道"，还得跟真文章一起去聚簇。
+        实测 158 条里有 11 条是这类页面（7%），其中两条互相聚成了一个"事件"并占了
+        热度榜首位。判据与实测依据见 `core.quality`。
+        """
+        if not sources:
+            return
+        kept = [item for item in sources if not is_listing(str(item.get("title", "")), str(item.get("url", "")))]
+        if len(kept) != len(sources):
+            logger.info("跳过 %d 条列表页 / 搜索页来源，不入资讯库", len(sources) - len(kept))
+        sources = kept
         if not sources:
             return
         url_hashes = [url_digest(str(item.get("url", ""))) for item in sources]

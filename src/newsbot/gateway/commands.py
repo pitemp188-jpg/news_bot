@@ -23,9 +23,12 @@ logger = get_logger(__name__)
 
 HELP_TEXT = """可用指令：
 直接发文字或 /搜 <内容>：立即搜索并把结果发给你
+/热榜：我们追踪到的事件热度榜（按独立来源计数，不是抓别家的榜单）
+/日报：今日精选（同一件事只留一条，附事件综述）
 /订阅 查看已有定时推送
 /订阅 <主题> [HH:MM]：每天定时推送该主题（默认 21:00）
 　主题可以带空格，如「github 热榜」；多个主题用逗号分隔，如「AI,芯片」
+　主题写「热榜」或「日报」时推送的是我们自己追踪的事件层，不走搜索
 　时间也可以只写小时，如「/订阅 github热榜 9」＝ 每天 09:00
 /退订 <编号>：删除一条定时推送
 /任务：查看最近任务
@@ -140,9 +143,23 @@ class Commands:
             return await self._list_tasks(event)
         if name == "停止":
             return await self._cancel(event, args)
+        if name in {"热榜", "热度", "热点"}:
+            return await self._submit_board(event, "hot", "热度榜")
+        if name in {"日报", "精选"}:
+            return await self._submit_board(event, "digest", "今日精选")
         return f"未知指令 /{name}。\n\n{HELP_TEXT}"
 
     # ── 指令实现 ──
+    async def _submit_board(self, event: MessageEvent, kind: str, label: str) -> str:
+        """推送事件层的结果（热度榜 / 日报）。
+
+        这两者读的是**我们自己追踪出来的事件**，不经过 Agent 现搜现写：事件层已经把
+        同一件事的多家报道归成一个事件、按独立来源算了热度、给多来源事件写了综述，
+        再让 Agent 重搜一遍等于把这份工作丢掉重做。
+        """
+        task = await self._queue.submit(kind=kind, query=label, platform=event.platform, chat_id=event.chat_id)
+        return f"正在生成{label}…\n任务 #{task.id}"
+
     async def _submit_search(self, event: MessageEvent, query: str) -> str:
         task = await self._queue.submit(kind="chat", query=query, platform=event.platform, chat_id=event.chat_id)
         logger.info("指令任务 #%d 来自 %s: %s", task.id, safe_id(event.user_id), query[:40])

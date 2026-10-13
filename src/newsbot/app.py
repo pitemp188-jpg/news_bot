@@ -23,6 +23,7 @@ from newsbot.core.db import Database
 from newsbot.core.llm import LLM, OpenAIClient
 from newsbot.core.log import get_logger
 from newsbot.core.models import Schedule
+from newsbot.dispatcher.events import refresh as refresh_events
 from newsbot.dispatcher.pipeline import Pipeline
 from newsbot.dispatcher.queue import TaskQueue
 from newsbot.dispatcher.scheduler import Scheduler, cron_from_time
@@ -33,6 +34,7 @@ from newsbot.gateway.commands import Commands
 from newsbot.gateway.qqbot import QQBotAdapter
 from newsbot.gateway.router import Router
 from newsbot.gateway.weixin import WeixinAdapter, WeixinStore
+from newsbot.result import board
 from newsbot.result.dedup import Deduper, StoryGrouper
 from newsbot.result.report import ReportBuilder
 
@@ -115,6 +117,7 @@ class App:
             sender=router,
             sessions=sessions,
             deduper=self._make_deduper,
+            timezone=config.app.timezone,
         )
         queue = self.queue = TaskQueue(db, config.queue, pipeline.execute)
         await queue.start()
@@ -130,7 +133,13 @@ class App:
         )
         router.set_inbound(self._on_message)
 
-        scheduler = self.scheduler = Scheduler(db, timezone=config.app.timezone, submit=self._submit_schedule)
+        scheduler = self.scheduler = Scheduler(
+            db,
+            timezone=config.app.timezone,
+            submit=self._submit_schedule,
+            refresh=self._refresh_events,
+            refresh_interval=config.editorial.refresh_interval_minutes,
+        )
         await scheduler.sync()
         scheduler.start()
 
@@ -212,11 +221,30 @@ class App:
         return row
 
     async def _submit_schedule(self, row: Schedule) -> None:
-        """定时触发：把订阅转成任务。"""
+        """定时触发：把订阅转成任务。
+
+        主题写成「热榜」/「日报」这类事件层关键词时，提交的是事件层呈现任务而不是
+        搜索任务——那类主题要的是"我们追踪到的事件"，交给 Agent 重搜一遍等于把事件层
+        （归组、独立来源计数、综述）整个丢掉重做。只认**单个**主题且它命中关键词的情况：
+        多主题混写（「AI,热榜」）意图不明，按搜索处理并保持原有行为。
+        """
         assert self.queue is not None
         topics = [str(topic) for topic in (row.topics or [])] or ["AI"]
+        board_kind = board.BOARD_TOPICS.get(topics[0]) if len(topics) == 1 else None
+        if board_kind is not None:
+            logger.info("订阅 #%d 的主题「%s」走事件层，不检索", row.id, topics[0])
+            await self.queue.submit(kind=board_kind, query=topics[0], platform=row.platform, chat_id=row.chat_id)
+            return
         query = "；".join(SCHEDULED_QUERY.format(topic=topic) for topic in topics[:3])
         await self.queue.submit(kind="scheduled", query=query, platform=row.platform, chat_id=row.chat_id)
+
+    async def _refresh_events(self) -> None:
+        """定时刷新事件层，让网页看到的是最近聚簇 / 精选的结果。"""
+        assert self.db is not None
+        llm = self._llm or OpenAIClient(self._config.secrets)
+        self._llm = llm
+        stats = await refresh_events(self.db, llm, editorial=self._config.editorial)
+        logger.info("事件层定时刷新：%s", stats.line())
 
     # ── 主动推送（notify） ──
     async def notify(self, text: str, *, platform: str | None = None, chat_id: str | None = None) -> bool:

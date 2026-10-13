@@ -681,3 +681,62 @@ async def test_time_range_filters_feeds() -> None:
     assert narrow.sources, "无日期条目应保留"
     assert all(source.published == "" for source in narrow.sources), "剩下的都应是无日期条目"
     assert "日期未知" in narrow.text
+
+
+# ── 栏目页过滤（真实 feed 抓到的条目） ──
+
+
+def test_index_page_filter_catches_measured_channel_pages() -> None:
+    """实测抓到的栏目页标题——留着会挤掉真内容，还会被聚簇当成"同一件事"。"""
+    from newsbot.agent.tools.search import _is_index_page
+
+    measured = [
+        "股票频道 - 东方财富网",
+        "公司资讯 _ 东方财富网",
+        "全球财经快讯_东方财富网",
+        "财经滚动新闻_新浪网",
+        "新华保险 举牌 国泰海通 - 搜索",
+        "华尔街见闻 - 7×24小时全球财经资讯与金融市场直播",
+        "AI News & Artificial Intelligence | TechCrunch",
+        "Artificial Intelligence | The Verge",
+        "Trending  repositories on GitHub today · GitHub",
+    ]
+    for title in measured:
+        assert _is_index_page(title, ""), title
+
+
+def test_index_page_filter_keeps_real_articles() -> None:
+    """零误伤是关键：误伤会直接丢内容。这几条都含连字符或全角标点，必须留下。"""
+    from newsbot.agent.tools.search import _is_index_page
+
+    articles = [
+        "某公司发布新一代推理芯片，称单位算力成本下降四成",
+        "微软在 Qwen 模型基础上推出决策模型 Microsoft-Decision-1",
+        "单次RL后训练烧掉260万美元、每步37亿Token，小米披露MiMo-V2.6“规模化强化学习” 路线",
+        "清华具身模型登顶全球第一！突围GPT-6、英伟达，不靠外挂和额外数据",
+        "Cloudflare acquires Deno to improve its Workers programming",
+        "JetBrains Releases Mellum2.1: A 12B MoE Open Model",
+    ]
+    for title in articles:
+        assert not _is_index_page(title, ""), title
+
+
+def test_index_page_filter_matches_the_channel_title_itself() -> None:
+    """与频道标题逐字相同最精确，别管它长什么样。"""
+    from newsbot.agent.tools.search import _is_index_page
+
+    assert _is_index_page("量子位", "量子位")
+    assert not _is_index_page("量子位发布新模型", "量子位")
+
+
+def test_parse_feed_drops_index_page_items() -> None:
+    """端到端：RSS 里混进一条频道自己的条目时，解析结果里不该有它。"""
+    from newsbot.agent.tools.search import parse_feed
+
+    rss = """<rss><channel><title>股票频道 - 东方财富网</title>
+    <item><title>股票频道 - 东方财富网</title><link>https://a.example/home</link></item>
+    <item><title>某公司发布新一代推理芯片，单位算力成本下降四成</title>
+      <link>https://a.example/news</link><description>官方称性能提升三成</description></item>
+    </channel></rss>"""
+    items = parse_feed(rss, "东方财富")
+    assert [item["title"] for item in items] == ["某公司发布新一代推理芯片，单位算力成本下降四成"]

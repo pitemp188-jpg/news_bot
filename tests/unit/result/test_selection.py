@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 from tests.fakes.llm import FakeLLM, reply
 
 from newsbot.core.config import EditorialSection
@@ -282,6 +282,50 @@ async def test_save_scores_updates_instead_of_duplicating(tmp_path: Any) -> None
         rows = (await session.scalars(select(StoryScore))).all()
     assert len(rows) == 1, "同一篇文章只留最后一次评分"
     assert rows[0].selected is True
+    await db.dispose()
+
+
+async def test_save_scores_is_immune_to_concurrent_writers(tmp_path: Any) -> None:
+    """另一个写者在"查询到"与"写入"之间插入同一行时，本批评分不能整批失败。
+
+    真实长跑里两个服务实例的 30 分钟定时刷新同时打分，两边都查到"还没有"、再插入时
+    撞上 `UNIQUE constraint failed: story_score.news_item_id`，那一批判定就整批丢了
+    （日志：`精选打分失败: IntegrityError`，而 `精选完成` 已经打过 24 条）。
+    修法是单条原子的 `ON CONFLICT DO UPDATE`。这里用 SQLAlchemy 事件挂钩，在本批的
+    写入语句执行前由同一条连接抢插一行，精确落在"查询之后、插入之前"那个窗口：
+    读-再-写的实现必然抛 IntegrityError，原子 upsert 则照常覆盖。
+    """
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'score4.db'}")
+    await db.prepare()
+    item_id = await _seed_item(db, "https://a.example/race")
+
+    state = {"intruded": False}
+    insert_sql = (
+        "INSERT INTO story_score (news_item_id, score1, score2, selected, reason, created_at)"
+        " VALUES (?, 1, 1, 0, '另一个实例写的', '2026-01-01 00:00:00')"
+    )
+
+    def intrude(conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool) -> None:
+        lowered = statement.lstrip().lower()
+        if state["intruded"] or "story_score" not in statement.lower() or not lowered.startswith("insert"):
+            return
+        state["intruded"] = True
+        conn.exec_driver_sql(insert_sql, (item_id,))
+
+    event.listen(db.engine.sync_engine, "before_cursor_execute", intrude)
+    try:
+        written = await sel.save_scores(
+            db, sel.Selection(scores=[sel.Score(news_item_id=item_id, score1=9, score2=9, threshold=8)])
+        )
+    finally:
+        event.remove(db.engine.sync_engine, "before_cursor_execute", intrude)
+
+    assert state["intruded"], "挂钩未生效，竞态没有被复现"
+    assert written == 1
+    async with db.session() as session:
+        rows = (await session.scalars(select(StoryScore))).all()
+    assert len(rows) == 1, "不能出现重复评分行"
+    assert rows[0].selected is True, "本批次的结果要覆盖抢插进来的那一行"
     await db.dispose()
 
 

@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 
 from newsbot.core.db import Database
@@ -21,8 +22,11 @@ from newsbot.core.models import Schedule
 logger = get_logger(__name__)
 
 SubmitSchedule = Callable[[Schedule], Awaitable[None]]
+RefreshEvents = Callable[[], Awaitable[None]]
 
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+# 事件层刷新作业的固定 id：它不属于任何订阅，用一个不会与 `schedule-<id>` 冲突的名字
+REFRESH_JOB_ID = "events-refresh"
 
 
 def cron_from_time(value: str) -> str:
@@ -40,9 +44,19 @@ def job_id(schedule_id: int) -> str:
 class Scheduler:
     """APScheduler 薄封装：作业内容由 submit 注入，便于单独测试。"""
 
-    def __init__(self, db: Database, *, timezone: str, submit: SubmitSchedule) -> None:
+    def __init__(
+        self,
+        db: Database,
+        *,
+        timezone: str,
+        submit: SubmitSchedule,
+        refresh: RefreshEvents | None = None,
+        refresh_interval: int | None = None,
+    ) -> None:
         self._db = db
         self._submit = submit
+        self._refresh = refresh
+        self._refresh_interval = refresh_interval or 0
         self._scheduler = AsyncIOScheduler(timezone=timezone)
 
     def start(self) -> None:
@@ -59,11 +73,13 @@ class Scheduler:
         return {job.id for job in self._scheduler.get_jobs()}
 
     async def sync(self) -> None:
-        """让作业集合与数据库中的启用订阅保持一致。"""
+        """让作业集合与数据库中的启用订阅保持一致，并挂上事件层刷新。"""
         async with self._db.session() as session:
             rows = (await session.execute(select(Schedule).where(Schedule.enabled.is_(True)))).scalars().all()
 
         expected = {job_id(row.id) for row in rows}
+        if self._refresh is not None and self._refresh_interval > 0:
+            expected.add(REFRESH_JOB_ID)
         for stale in self.job_ids() - expected:
             self._scheduler.remove_job(stale)
         for row in rows:
@@ -74,7 +90,26 @@ class Scheduler:
                 args=[row.id],
                 replace_existing=True,
             )
-        logger.info("定时作业已同步，共 %d 个", len(expected))
+        if self._refresh is not None and self._refresh_interval > 0:
+            # 事件层按间隔刷新而非固定时刻：抓取随时在写库，聚簇要能跟上新到货
+            self._scheduler.add_job(
+                self.run_refresh,
+                trigger=IntervalTrigger(minutes=self._refresh_interval),
+                id=REFRESH_JOB_ID,
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+        logger.info("定时作业已同步，共 %d 个", len(self.job_ids()))
+
+    async def run_refresh(self) -> None:
+        """事件层刷新：聚簇 → 精选 → 热度快照。失败只记日志，不能拖垮调度器。"""
+        if self._refresh is None:
+            return
+        try:
+            await self._refresh()
+        except Exception:
+            logger.exception("事件层刷新失败")
 
     async def run_job(self, schedule_id: int) -> None:
         """作业体：订阅仍启用时提交任务。"""

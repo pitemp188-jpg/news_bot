@@ -52,6 +52,17 @@ def _build_parser() -> argparse.ArgumentParser:
     digest = sub.add_parser("digest", help="按事件组织一份日报/周报/月报（纯规则组装，不调用模型）")
     digest.add_argument("--period", choices=["daily", "weekly", "monthly"], default="daily", help="周期，默认日报")
     digest.add_argument("--limit", type=int, help="最多列多少条事件，默认取 digest 的默认值")
+
+    events = sub.add_parser("events", help="刷新事件层：聚簇未归组资讯 → 多来源事件综述 → 两轮打分精选 → 热度快照")
+    events.add_argument("--days", type=int, help="只看最近这么多天的资讯，默认取配置 cluster_days")
+    events.add_argument("--cluster-only", action="store_true", help="只做聚簇，不写综述也不打分")
+    events.add_argument("--select-only", action="store_true", help="只打分，不聚簇也不写综述")
+    events.add_argument("--summary-only", action="store_true", help="只生成综述，不聚簇也不打分")
+    events.add_argument(
+        "--reset",
+        action="store_true",
+        help="先清空事件层（事件/归属/评分/快照）再重跑；资讯库不动。用于算法改进后重来",
+    )
     return parser
 
 
@@ -242,12 +253,51 @@ async def _digest(period: str, limit: int | None) -> int:
     db = Database(config.db_url)
     try:
         await db.prepare()
-        built = await digest_mod.assemble(db, period=period, limit=limit or digest_mod.DEFAULT_LIMIT)
+        built = await digest_mod.assemble(
+            db, period=period, limit=limit or digest_mod.DEFAULT_LIMIT, timezone=config.app.timezone
+        )
     finally:
         await db.dispose()
     print(built.render())
     if not built.entries:
         print("\n提示：编排只读已归组的事件。库里还没有事件时，先跑一次聚簇（或先执行一次任务）。")
+    return 0
+
+
+async def _events(days: int | None, *, cluster_only: bool, select_only: bool, summary_only: bool, reset: bool) -> int:
+    """刷新事件层并打印结果。
+
+    与 `digest` 的区别：`digest` 只读已有事件（零模型调用、瞬时），`events` 会真的
+    调用模型做归组、写综述与打分——第一次跑或隔了很久没跑时才需要它。
+    """
+    from newsbot.core.llm import OpenAIClient
+    from newsbot.dispatcher import events as events_mod
+
+    config = get_config()
+    setup_logging(level=config.app.log_level, log_dir=config.log_dir)
+    db = Database(config.db_url)
+    llm = OpenAIClient(config.secrets)
+    try:
+        await db.prepare()
+        if reset:
+            print("已清空事件层：", await events_mod.reset(db))
+        stats = await events_mod.refresh(
+            db,
+            llm,
+            editorial=config.editorial,
+            days=days,
+            # 三个 --*-only 是互斥的用法，同时给多个等于"只做被点名的那几件"之外的事都不做；
+            # 实际使用中一次只给一个，这里不为它加额外的冲突校验（有 `stats.line()` 可核对）
+            do_cluster=not (select_only or summary_only),
+            do_select=not (cluster_only or summary_only),
+            do_summarize=not (cluster_only or select_only),
+        )
+    finally:
+        await llm.aclose()
+        await db.dispose()
+    print(stats.line())
+    if stats.loaded == 0:
+        print("\n没有待归组的资讯。先跑一次任务（或在聊天里问一个问题）把资讯抓进库。")
     return 0
 
 
@@ -271,6 +321,16 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_migrate())
     if args.command == "digest":
         return asyncio.run(_digest(args.period, args.limit))
+    if args.command == "events":
+        return asyncio.run(
+            _events(
+                args.days,
+                cluster_only=args.cluster_only,
+                select_only=args.select_only,
+                summary_only=args.summary_only,
+                reset=args.reset,
+            )
+        )
     if args.command == "api":
         from newsbot.api.server import serve_api
 

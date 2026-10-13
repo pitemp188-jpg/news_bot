@@ -10,6 +10,7 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import select
 from tests.fakes.llm import FakeLLM
 
 from newsbot.core.db import Database
@@ -71,6 +72,37 @@ def test_entry_line_does_not_call_the_model() -> None:
     assert "另一家标题" in entry.line()
 
 
+def test_entry_line_never_echoes_the_title_it_was_built_from() -> None:
+    """没有综述时不能把事件标题的**来源标题**再列一遍。
+
+    回归用例（真实数据上抓到）：事件标题被模型改成中文短句后，`titles[0]` 仍是外文
+    原标题，而回退逻辑当时用的是「归一化后是否等于事件标题」——判据因此失效，日报里
+    出现「中文标题」+「英文原标题」两行同义内容，**单来源事件也凭空多出一行**。
+    """
+    entry = dg.Entry(
+        story_id=1,
+        title="谷歌云推持久Gemini代理",
+        titles=["Google Cloud unveils persistent Gemini Agents for long-running tasks"],
+        participants=1,
+    )
+    text = entry.line()
+    assert "Google Cloud unveils" not in text, "单来源事件没有别的说法，不该有正文行"
+    assert "\n" not in text, "只有标题一行，没有正文行（这条也没有网址）"
+
+
+def test_entry_line_still_lists_the_other_sources() -> None:
+    """多来源事件且模型没写成综述时，别家的标题仍要列出来（回退的价值所在）。"""
+    entry = dg.Entry(
+        story_id=1,
+        title="两家都报了这件事",
+        titles=["First report in English", "Second report in English", "Third report"],
+        participants=3,
+    )
+    text = entry.line()
+    assert "Second report in English" in text
+    assert "First report in English" not in text, "第一条就是标题来源，列出来是重复"
+
+
 def test_within_period_uses_last_seen() -> None:
     """上周开始、今天有进展的事件属于今天；按首次出现筛会让它永远不再出现。"""
     story = Story(title="x", first_seen_at=NOW - timedelta(days=9), last_seen_at=NOW - timedelta(hours=2))
@@ -92,8 +124,13 @@ async def _seed(
     last_seen_hours: float,
     reports: list[tuple[str, str, str, bool]],
     scores: list[int] | None = None,
+    selected: bool = True,
 ) -> int:
-    """建一个事件与它的报道。`reports` 每项是 (participant, tier, role, editorial)。"""
+    """建一个事件与它的报道。`reports` 每项是 (participant, tier, role, editorial)。
+
+    默认给每条报道一条**已入选**的评分：日报只收通过精选的事件（见 `digest._selected`），
+    不带上评分就什么都不会被列出。
+    """
     async with db.session() as session:
         story = Story(
             title=story_title,
@@ -118,9 +155,8 @@ async def _seed(
                     observed_at=NOW - timedelta(hours=last_seen_hours - index / 10),
                 )
             )
-            if scores:
-                total = scores[index % len(scores)]
-                session.add(StoryScore(news_item_id=item.id, score1=total, score2=total, selected=True))
+            total = (scores or [8])[index % len(scores or [8])]
+            session.add(StoryScore(news_item_id=item.id, score1=total, score2=total, selected=selected))
         await session.commit()
         return story.id
 
@@ -303,3 +339,48 @@ def test_decorate_leaves_stories_outside_the_ranking_alone() -> None:
     dg.decorate([entry], [])
     assert entry.participants == 1
     assert entry.importance == dg.importance(0, 1)
+
+
+# ── 精选决定日报内容（跑真实数据时发现的缺口） ──
+
+
+async def test_assemble_excludes_events_that_failed_selection(tmp_path: Any) -> None:
+    """精选就是入选判定。不读 `selected` 会让精选对日报毫无影响——
+    实测跑完真实数据后：精选入选 6 条，日报却照旧列了 12 条。"""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'digest11.db'}")
+    await db.prepare()
+    await _seed(
+        db, story_title="落选了", last_seen_hours=1, reports=[("a.example", "T2", "primary", True)], selected=False
+    )
+    await _seed(
+        db, story_title="入选了", last_seen_hours=1, reports=[("b.example", "T2", "primary", True)], selected=True
+    )
+    digest = await dg.assemble(db, period="daily", now=NOW)
+    assert [entry.title for entry in digest.entries] == ["入选了"]
+    assert digest.skipped["not_selected"] == 1
+    await db.dispose()
+
+
+async def test_assemble_excludes_unscored_events(tmp_path: Any) -> None:
+    """还没打分的事件不进日报：与 `Score.selected` 对未评分的语义一致（失败方向选"少列"）。"""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'digest12.db'}")
+    await db.prepare()
+    await _seed(db, story_title="还没打分", last_seen_hours=1, reports=[("a.example", "T2", "primary", True)])
+    async with db.session() as session:
+        row = await session.scalar(select(StoryScore))
+        assert row is not None
+        await session.delete(row)
+        await session.commit()
+    digest = await dg.assemble(db, period="daily", now=NOW)
+    assert digest.entries == []
+    await db.dispose()
+
+
+async def test_assemble_ignores_selection_from_earlier_periods(tmp_path: Any) -> None:
+    """上周入选、本周只是被重新抓取的事件不该再进今天的日报。"""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path / 'digest13.db'}")
+    await db.prepare()
+    await _seed(db, story_title="很久以前入选过", last_seen_hours=72, reports=[("a.example", "T2", "primary", True)])
+    digest = await dg.assemble(db, period="daily", now=NOW)
+    assert digest.entries == []
+    await db.dispose()

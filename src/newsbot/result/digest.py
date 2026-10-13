@@ -12,6 +12,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -27,6 +28,13 @@ PERIOD_DAYS = {"daily": 1, "weekly": 7, "monthly": 30}
 DEFAULT_PERIOD = "daily"
 # 日报最多列这么多条事件。条数不是靠"模型觉得够了"定的，而是版面决定的
 DEFAULT_LIMIT = 12
+
+# 展示日期用的默认时区；实际由调用方传入 config.app.timezone。
+# **不能用 `astimezone()`**（那是宿主时区）：本机 UTC+8 看着正确，部署到 UTC 服务器上
+# 用户看到的日期会差 8 小时，跨日时连日期都差一天
+DEFAULT_TIMEZONE = "Asia/Shanghai"
+# 没有综述时最多列出几条**别的报道**的标题
+MAX_FALLBACK_TITLES = 2
 # 取热度榜时放宽到这么多条：日报要按热度修正重要度，只取前 12 条会让第 13 名之后
 # 的事件拿不到热度口径的参与者数，排序因此与热度榜不一致
 HEAT_LOOKUP = 200
@@ -85,7 +93,8 @@ class Entry:
         if self.follow_up_only:
             tail += " · 后续进展"
         tail += "）"
-        body = self.digest.strip() or "；".join(self.titles[:3])
+        # 正文优先用模型写的综述。没有综述时才退回"把别的报道标题列出来"（见 `_other_titles`）
+        body = self.digest.strip() or "；".join(_other_titles(self.titles, self.title))
         text = f"- {head}{tail}"
         if body:
             text += f"\n  {body}"
@@ -101,13 +110,16 @@ class Digest:
     period: str
     since: datetime
     until: datetime
+    # 展示用日期所在的时区。只影响**呈现**（标题上的日期），窗口边界仍按传入的
+    # `now` 算——换时区不该改变"哪些事件算本期"
+    timezone: str = DEFAULT_TIMEZONE
     entries: list[Entry] = field(default_factory=list)
     skipped: dict[str, int] = field(default_factory=dict)
 
     @property
     def title(self) -> str:
         label = {"daily": "日报", "weekly": "周报", "monthly": "月报"}.get(self.period, "日报")
-        return f"{self.until:%Y-%m-%d} {label}"
+        return f"{local_time(self.until, self.timezone):%Y-%m-%d} {label}"
 
     def render(self) -> str:
         if not self.entries:
@@ -133,6 +145,7 @@ async def assemble(
     period: str = DEFAULT_PERIOD,
     now: datetime | None = None,
     limit: int = DEFAULT_LIMIT,
+    timezone: str = DEFAULT_TIMEZONE,
 ) -> Digest:
     """组装一份日报/周报/月报。
 
@@ -142,7 +155,12 @@ async def assemble(
     moment = now or datetime.now(UTC)
     days = PERIOD_DAYS.get(period, PERIOD_DAYS[DEFAULT_PERIOD])
     since = moment - timedelta(days=days)
-    digest = Digest(period=period if period in PERIOD_DAYS else DEFAULT_PERIOD, since=since, until=moment)
+    digest = Digest(
+        period=period if period in PERIOD_DAYS else DEFAULT_PERIOD,
+        since=since,
+        until=moment,
+        timezone=timezone,
+    )
     async with db.session() as session:
         stories = (await session.scalars(select(Story).where(Story.last_seen_at >= since))).all()
         if not stories:
@@ -161,7 +179,7 @@ async def assemble(
     for report, item, score in rows:
         grouped.setdefault(report.story_id, []).append((report, item, score))
 
-    dropped = {"period": 0, "duplicate_follow_up": 0}
+    dropped = {"period": 0, "duplicate_follow_up": 0, "not_selected": 0}
     entries: list[Entry] = []
     for story in stories:
         records = grouped.get(story.id, [])
@@ -174,6 +192,14 @@ async def assemble(
         # 本期没有任何新报道 = 旧闻，不进本期
         if not fresh:
             dropped["period"] += 1
+            continue
+        # **精选就是入选判定**：本期没有任何一条报道过入选门槛的事件不进日报。
+        # 不读 `selected` 会让精选对日报毫无影响——实测跑完真实数据后，精选入选 6 条
+        # 而日报照旧列了 12 条，整条链路等于白接。
+        # 未评分的条目按未入选处理（`Score.selected` 的既有语义），所以打分没跑到的事件
+        # 不会混进来；这是"宁可少列"的方向，与精选的失败方向一致。
+        if not _selected(fresh):
+            dropped["not_selected"] += 1
             continue
         entries.append(_entry(story, records, fresh))
 
@@ -192,6 +218,16 @@ async def assemble(
         max(0, len(entries) - limit),
     )
     return digest
+
+
+def _selected(fresh: list[Any]) -> bool:
+    """本期是否有报道通过了精选。
+
+    判据是**本期**的报道：上周入选、本周只是被重新抓取的事件不该再进今天的日报。
+    `score` 为 None（还没打分）按未入选处理——与 `Score.selected` 对未评分的语义一致，
+    失败方向同样选"少列一条"而不是"全塞进去"。
+    """
+    return any(score is not None and bool(score.selected) for _, _, score in fresh)
 
 
 def _entry(story: Story, records: list[Any], fresh: list[Any]) -> Entry:
@@ -248,3 +284,50 @@ def decorate(entries: list[Entry], ranking: list[hot.HotEntry]) -> None:
 def _as_utc(value: datetime) -> datetime:
     """SQLite 不保留时区，读回来是 naive；约定按 UTC 解释。"""
     return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def local_time(value: datetime, timezone: str = DEFAULT_TIMEZONE) -> datetime:
+    """把时刻换算到**展示时区**再格式化。
+
+    时区名解析不出来时退回 UTC 并告警，而不是用 `astimezone()` 取宿主时区——
+    宿主时区在不同机器上给出不同结果，那正是这一类的缺陷来源。
+    """
+    try:
+        zone: Any = ZoneInfo(timezone)
+    except Exception:  # 时区名写错不该让日报整份渲染不出来
+        logger.warning("时区 %s 解析失败，按 UTC 展示", timezone)
+        zone = UTC
+    return _as_utc(value).astimezone(zone)
+
+
+def _other_titles(titles: list[str], title: str) -> list[str]:
+    """没有综述时，列出**别的报道**的标题。
+
+    排除第一条：它就是事件标题的来源，列出来等于把标题重说一遍。此前用的是
+    「归一化后是否等于事件标题」，那在标题等于第一条报道标题时勉强成立；标题改成
+    模型写的中文短句之后**判据失效**——实测日报里出现「中文标题」+「英文原标题」
+    两行同义内容，单来源事件也凭空多出一行。所以改成**按位置**排除第一条，
+    并额外挡一道"与事件标题同义"。
+    """
+    if len(titles) < 2:
+        return []
+    head = _normalized(titles[0])
+    same_as_title = _normalized(title)
+    picked: list[str] = []
+    for candidate in titles[1:]:
+        key = _normalized(candidate)
+        if not key or key in (head, same_as_title):
+            continue
+        picked.append(candidate)
+        if len(picked) >= MAX_FALLBACK_TITLES:
+            break
+    return picked
+
+
+def _normalized(text: str) -> str:
+    """比对标题是否"同一句"时用的归一化：去掉空白与常见标点再比。
+
+    「Microsoft AI Releases Microsoft-Decision-1: A Qwen3.5-9B…」与去掉冒号空格后的
+    写法在读者眼里是同一句，逐字比对会当成两条不同的内容列出来。
+    """
+    return "".join(ch for ch in (text or "").lower() if ch.isalnum())

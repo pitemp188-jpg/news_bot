@@ -6,6 +6,14 @@
 
 from __future__ import annotations
 
+from newsbot.dispatcher.scheduler import REFRESH_JOB_ID
+
+
+def _schedule_jobs(app) -> set[str]:
+    """订阅作业集合。事件层刷新作业与订阅无关、启动即挂上，故先剔除。"""
+    assert app.scheduler is not None
+    return app.scheduler.job_ids() - {REFRESH_JOB_ID}
+
 
 async def test_list_empty(api) -> None:
     await api.login()
@@ -32,8 +40,7 @@ async def test_create_with_time_and_cron(api) -> None:
     assert [item["topics"][0] for item in items] == ["半导体", "AI"]
 
     # 新建后调度器立即同步，不必重启
-    assert api.app.scheduler is not None
-    assert api.app.scheduler.job_ids() == {f"schedule-{item['id']}" for item in items}
+    assert _schedule_jobs(api.app) == {f"schedule-{item['id']}" for item in items}
 
 
 async def test_create_validation(api) -> None:
@@ -76,11 +83,11 @@ async def test_update_topics_time_and_enabled(api) -> None:
 
     disabled = await api.write("patch", f"/api/schedules/{created['id']}", json={"enabled": False})
     assert disabled.json()["enabled"] is False
-    assert api.app.scheduler is not None and api.app.scheduler.job_ids() == set()
+    assert _schedule_jobs(api.app) == set()
 
     enabled = await api.write("patch", f"/api/schedules/{created['id']}", json={"enabled": True})
     assert enabled.json()["enabled"] is True
-    assert api.app.scheduler is not None and api.app.scheduler.job_ids() == {f"schedule-{created['id']}"}
+    assert _schedule_jobs(api.app) == {f"schedule-{created['id']}"}
 
     assert (await api.write("patch", "/api/schedules/99999", json={"enabled": False})).status_code == 404
 
