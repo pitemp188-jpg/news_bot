@@ -92,6 +92,43 @@ class DeliverySection(BaseModel):
     fallback_platform: str = "qqbot"
 
 
+class AutomationSection(BaseModel):
+    """事件层的自动化：定时采集（进料）与新事件告警（主动推送）。
+
+    为什么与 `EditorialSection` 分开：那边是"怎么选、怎么写"的口径参数，这里是
+    "多久动一次、往哪推"的节奏与投递参数。混在一起会让调精选门槛的人顺手改到推送频率。
+    """
+
+    # ── 采集：让热榜的进料不再依赖人问一句 ──
+    # 关掉就退回"只有提问与订阅才会进料"的行为（库里会重新变得稀疏）
+    collect_enabled: bool = True
+    # 采集间隔。30 分钟与事件层刷新同频：实测 15 个源一次拉取约 5～15s，
+    # 半小时一次的代价可以忽略，而更疏会让"新出现"的热点晚半天才被发现
+    collect_interval_minutes: int = 30
+    # 时间窗：只要最近这么多天的条目。订阅源本身是内容流，但实测有的源夹带几个月前的旧文
+    collect_days: int = 1
+    # 单次**取回**条数上限（去重前）。它是取回上限而不是入库上限：采集每半小时一次，
+    # 同一批条目会被反复取回，实测一轮取回 120 条只有 34 条是新的。设小了会漏掉
+    # "排在后面的新条目"（排序按发布时间倒序，丢的是最旧的），所以给得比预期入库量大
+    collect_max_items: int = 300
+    # 采集时单个源的上限。比检索的 8s 宽得多：实测 15 个源里有 5 个在 8s 内返回不了，
+    # 用检索的上限去采集等于稳定漏掉三分之一的内容（背景作业多等十几秒没人察觉）
+    collect_feed_timeout_seconds: float = 25.0
+
+    # ── 告警：发现够格的新事件就推给你 ──
+    alert_enabled: bool = True
+    # 推送目标。留空则回退到"最近一次成功投递过的会话"——那通常就是你在用的那个群
+    alert_platform: str = "qqbot"
+    alert_chat_id: str = ""
+    # 单次最多推几条。这是防刷屏的硬护栏：热搜同时爆发时宁可漏推，
+    # 也不要把一次刷新变成一串消息（漏掉的下一轮还会在榜上，不会消失）
+    alert_max_per_run: int = 3
+    # 新事件的判定窗口与热度榜的"趋势"口径一致（`hot.TREND_GAP_HOURS` 小时前热度为 0），
+    # 这里只放"上线首轮不推历史积压"的护栏：库里从没推过任何事件时，
+    # 先把当前达标的全部标记为已推，避免第一次运行就把几十个旧事件一次推光
+    alert_bootstrap: bool = True
+
+
 class EditorialSection(BaseModel):
     """精选（日报/事件页的入选判定）配置。
 
@@ -310,6 +347,7 @@ class Config(BaseModel):
     agent: AgentSection = Field(default_factory=AgentSection)
     search: SearchSection = Field(default_factory=SearchSection)
     delivery: DeliverySection = Field(default_factory=DeliverySection)
+    automation: AutomationSection = Field(default_factory=AutomationSection)
     editorial: EditorialSection = Field(default_factory=EditorialSection)
     api: ApiSection = Field(default_factory=ApiSection)
     secrets: Secrets = Field(default_factory=Secrets)

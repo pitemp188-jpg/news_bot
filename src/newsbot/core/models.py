@@ -152,6 +152,9 @@ class Story(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
     # 人工改过的归属不允许被后续自动归组覆盖（AIHOT 的约定，避免"改完又被改回去"）
     locked: Mapped[bool] = mapped_column(default=False)
+    # 上次把这个事件当"新事件"推给用户的时刻；为空表示还没推过。
+    # 必须落库而不是放内存：进程一重启就会把同样的事再推一遍
+    alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
 class ReportItem(Base):

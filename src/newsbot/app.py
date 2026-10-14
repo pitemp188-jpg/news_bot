@@ -23,6 +23,8 @@ from newsbot.core.db import Database
 from newsbot.core.llm import LLM, OpenAIClient
 from newsbot.core.log import get_logger
 from newsbot.core.models import Schedule
+from newsbot.dispatcher.alert import notify as alert_events
+from newsbot.dispatcher.collect import collect as collect_feeds
 from newsbot.dispatcher.events import refresh as refresh_events
 from newsbot.dispatcher.pipeline import Pipeline
 from newsbot.dispatcher.queue import TaskQueue
@@ -79,6 +81,9 @@ class App:
         self.scheduler: Scheduler | None = None
         self.commands: Commands | None = None
         self.runner: Runner | None = None
+        # 采集作业要复用同一个搜索工具：源列表、并发闸、连接池都在它里面，
+        # 另起一个实例等于把同一批源用两条连接池各拉一遍
+        self.search: Any = None
 
     # ── 生命周期 ──
     async def start(self) -> dict[str, bool]:
@@ -139,6 +144,9 @@ class App:
             submit=self._submit_schedule,
             refresh=self._refresh_events,
             refresh_interval=config.editorial.refresh_interval_minutes,
+            collect=self._collect_feeds,
+            # 关掉采集时传 0：调度器用 0 表示「不挂这个作业」，与刷新同一套约定
+            collect_interval=(config.automation.collect_interval_minutes if config.automation.collect_enabled else 0),
         )
         await scheduler.sync()
         scheduler.start()
@@ -245,6 +253,56 @@ class App:
         self._llm = llm
         stats = await refresh_events(self.db, llm, editorial=self._config.editorial)
         logger.info("事件层定时刷新：%s", stats.line())
+        await self._alert_events()
+
+    async def _collect_feeds(self) -> None:
+        """定时采集：把订阅源的最新条目拉进资讯库。
+
+        这是「自动」的那一半：在此之前资讯库只在有人提问或订阅触发时才进料，
+        于是 30 分钟一次的刷新永远看到「候选 0 条」，热榜算的是几天前的存量。
+        它刻意不走 Agent、不调用模型——「把源上最新的东西都取回来」不需要判断力。
+        """
+        config = self._config.automation
+        if not config.collect_enabled:
+            return
+        tool = self.search
+        if tool is None:
+            logger.warning("搜索工具未就绪，跳过采集")
+            return
+        assert self.db is not None
+        stats = await collect_feeds(
+            self.db,
+            tool,
+            days=config.collect_days,
+            limit=config.collect_max_items,
+            feed_timeout=config.collect_feed_timeout_seconds,
+        )
+        logger.info("定时采集：%s", stats.line())
+
+    async def _alert_events(self) -> None:
+        """把「刚出现且够格」的事件推给用户。
+
+        挂在刷新**之后**：新事件的判定依赖刚刚落库 / 聚簇的数据，顺序反了就是拿着
+        上一轮的状态去推。失败只记日志——投递出问题不该被看成「刷新失败」。
+        """
+        config = self._config.automation
+        if not config.alert_enabled:
+            return
+        assert self.db is not None
+        try:
+            stats = await alert_events(
+                self.db,
+                self.router,
+                platform=config.alert_platform,
+                chat_id=config.alert_chat_id,
+                max_per_run=config.alert_max_per_run,
+                bootstrap=config.alert_bootstrap,
+                timezone=self._config.app.timezone,
+            )
+        except Exception:
+            logger.exception("新事件告警失败")
+            return
+        logger.info("新事件告警：%s", stats.line())
 
     # ── 主动推送（notify） ──
     async def notify(self, text: str, *, platform: str | None = None, chat_id: str | None = None) -> bool:
@@ -272,18 +330,23 @@ class App:
     # ── 组装细节 ──
     def _build_tools(self, db: Database, *, browser: BrowserRunner | None) -> list[Any]:
         if self._tools_in is not None:
+            # 注入替身时也要认出搜索工具：采集作业依赖它的 `latest()`，
+            # 找不到就静默不采集——那正是「以为在自动、其实一直没动」的坑
+            self.search = next((tool for tool in self._tools_in if isinstance(tool, SearchTool)), None)
             return list(self._tools_in)
         config = self._config
+        search = SearchTool(
+            config.agent,
+            config.secrets,
+            feeds=config.search.feeds,
+            feed_concurrency=config.search.feed_concurrency,
+            # 日期按配置时区显示，不跟随宿主时区：部署到 UTC 服务器上会让用户
+            # 看到的日期差 8 小时，跨日时甚至差一天
+            timezone=config.app.timezone,
+        )
+        self.search = search
         tools: list[Any] = [
-            SearchTool(
-                config.agent,
-                config.secrets,
-                feeds=config.search.feeds,
-                feed_concurrency=config.search.feed_concurrency,
-                # 日期按配置时区显示，不跟随宿主时区：部署到 UTC 服务器上会让用户
-                # 看到的日期差 8 小时，跨日时甚至差一天
-                timezone=config.app.timezone,
-            ),
+            search,
             FetchTool(config.agent, allow_private=False),
             NewsDbTool(db, timezone=config.app.timezone),
         ]

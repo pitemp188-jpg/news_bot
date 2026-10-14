@@ -13,11 +13,13 @@ import pytest
 from sqlalchemy import select
 from tests.fakes.adapter import FakeAdapter
 from tests.fakes.llm import FakeLLM, reply
+from tests.fakes.search import FakeSearchTool
 
 from newsbot.app import App, run_service
 from newsbot.core.config import Config, ScheduleSection, Secrets
-from newsbot.core.models import Schedule, Task
-from newsbot.dispatcher.scheduler import REFRESH_JOB_ID
+from newsbot.core.models import NewsItem, Schedule, Task
+from newsbot.dispatcher.alert import AlertStats
+from newsbot.dispatcher.scheduler import COLLECT_JOB_ID, REFRESH_JOB_ID
 
 pytestmark = pytest.mark.integration
 
@@ -40,9 +42,9 @@ async def _app(tmp_path: Path, adapter: FakeAdapter | None = None, **schedule: o
 
 
 def _schedule_jobs(app: App) -> set[str]:
-    """订阅作业集合。事件层刷新作业与订阅无关、启动即挂上，故先剔除。"""
+    """订阅作业集合。与订阅无关的内置作业（事件层刷新、定时采集）启动即挂上，故先剔除。"""
     assert app.scheduler is not None
-    return app.scheduler.job_ids() - {REFRESH_JOB_ID}
+    return app.scheduler.job_ids() - {REFRESH_JOB_ID, COLLECT_JOB_ID}
 
 
 async def _schedule_with(app: App, topic: str) -> Schedule:
@@ -173,6 +175,109 @@ async def test_scheduled_board_topic_bypasses_search(tmp_path: Path) -> None:
             tasks = list((await session.execute(select(Task))).scalars())
         assert [task.kind for task in tasks] == ["hot"], "应提交事件层任务"
         assert "汇总" not in str(tasks[0].query), "不该拼成检索问句"
+    finally:
+        await app.stop()
+
+
+async def test_start_registers_the_collect_job(tmp_path: Path) -> None:
+    """定时采集作业与订阅无关，启动就要挂上。
+
+    这是「自动」能不能成立的唯一证据：作业不挂，库里就只在有人提问或订阅触发时
+    才进料，事件层刷新永远看到「候选 0 条」（实测某天 0 条新数据）。
+    """
+    app, _ = await _app(tmp_path)
+    try:
+        assert app.scheduler is not None
+        assert COLLECT_JOB_ID in app.scheduler.job_ids()
+    finally:
+        await app.stop()
+
+
+async def test_collect_feeds_stores_items(tmp_path: Path) -> None:
+    """采集作业要真的把源上的条目写进资讯库，而不是只调一下工具。"""
+    app, _ = await _app(tmp_path)
+    try:
+        assert app.db is not None
+        tool = FakeSearchTool(
+            hits=[
+                {
+                    "title": "某公司发布新一代推理芯片",
+                    "url": "https://example.com/a",
+                    "snippet": "官方称性能提升三成",
+                    "source": "a.com",
+                }
+            ]
+        )
+        app.search = tool
+        await app._collect_feeds()
+        async with app.db.session() as session:
+            rows = list((await session.execute(select(NewsItem))).scalars())
+        assert [row.title for row in rows] == ["某公司发布新一代推理芯片"]
+        assert tool.latest_calls, "要走采集（按时间窗取回），不是走检索"
+    finally:
+        await app.stop()
+
+
+async def test_collect_feeds_respects_the_switch(tmp_path: Path) -> None:
+    """关掉采集就一条都不拉——这个开关是给「不想让它自己抓」留的。"""
+    app, _ = await _app(tmp_path)
+    try:
+        app._config.automation.collect_enabled = False
+        tool = FakeSearchTool()
+        app.search = tool
+        await app._collect_feeds()
+        assert tool.latest_calls == []
+    finally:
+        await app.stop()
+
+
+async def test_collect_feeds_without_a_search_tool(tmp_path: Path) -> None:
+    """搜索工具没就绪时只告警，不能抛异常——它是按时跑的后台作业。"""
+    app, _ = await _app(tmp_path)
+    try:
+        app.search = None
+        await app._collect_feeds()
+    finally:
+        await app.stop()
+
+
+async def test_refresh_events_triggers_alert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """刷新之后必须走到告警——漏了这一步，榜算得再准也不会有人知道。
+
+    这里打桩验证**接线**（刷新完调告警、参数按配置传下去）；推送本身的每条规则
+    在 `tests/unit/dispatcher/test_alert.py` 里验过，不在此重复。
+    """
+    called: list[dict[str, object]] = []
+
+    async def fake(db: object, sender: object, **kwargs: object) -> AlertStats:
+        called.append(kwargs)
+        return AlertStats(note="打桩")
+
+    monkeypatch.setattr("newsbot.app.alert_events", fake)
+    app, _ = await _app(tmp_path)
+    try:
+        await app._refresh_events()
+        assert len(called) == 1, "刷新完应恰好调一次告警"
+        assert called[0]["timezone"] == "Asia/Shanghai", "展示时区要按配置传下去"
+        assert called[0]["platform"] == "qqbot"
+    finally:
+        await app.stop()
+
+
+async def test_refresh_events_skips_alert_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """关掉告警就一次都不调。"""
+    called: list[dict[str, object]] = []
+
+    async def fake(db: object, sender: object, **kwargs: object) -> AlertStats:
+        called.append(kwargs)
+        return AlertStats()
+
+    monkeypatch.setattr("newsbot.app.alert_events", fake)
+    app, _ = await _app(tmp_path)
+    try:
+        app._config.automation.alert_enabled = False
+        await app._refresh_events()
+        assert called == []
     finally:
         await app.stop()
 

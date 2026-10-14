@@ -69,7 +69,11 @@ def _render_entry(index: int, entry: hot.HotEntry, url: str) -> str:
     marks = [f"{entry.participants} 家报道", f"热度 {entry.index}"]
     label = TREND_LABEL.get(entry.trend, entry.trend)
     if entry.trend != "flat" and label:
-        marks.append(f"{label} {entry.trend_pct:.0f}%" if entry.trend_pct else label)
+        # 必须用 `:.0%` 而不是 `:.0f}%`：`trend_pct` 是**比例**（0.159 = 15.9%），
+        # 数值格式 `%` 不会自动乘 100——写成 `:.0f}%` 会让所有涨跌幅差 100 倍，
+        # 而且因为四舍五入，±10% 以内的变化一律显示成 `0%`（真机实测出过
+        # 「降温 -0%」：实际是 -15.9% 的纯时间衰减），读者完全看不出变化
+        marks.append(f"{label} {entry.trend_pct:.0%}" if entry.trend_pct else label)
     line += f"\n　（{' · '.join(marks)}）"
     if url:
         line += f"\n　{url}"
@@ -99,6 +103,30 @@ async def hot_text(
     lines = [
         f"热度榜 · {dg.local_time(moment, timezone):%m-%d %H:%M}",
         "48 小时窗口 · 24 小时半衰期 · 按独立来源计数（一家媒体发十篇只算一次）",
+        "",
+    ]
+    lines.extend(_render_entry(index, entry, urls.get(entry.story_id, "")) for index, entry in enumerate(entries, 1))
+    return "\n".join(lines)
+
+
+async def new_event_text(
+    db: Database,
+    entries: list[hot.HotEntry],
+    *,
+    now: datetime | None = None,
+    timezone: str = dg.DEFAULT_TIMEZONE,
+) -> str:
+    """新事件告警的聊天文本：一件事一条，与热度榜同一套指标与排版。
+
+    为什么复用榜单的条目渲染而不是另写一套：告警里说的"热度 19.3 · 2 家报道 · 新出现"
+    必须与用户随后打开的榜单**对得上**。两处各写一套，改了一处就会出现"推送里写 2 家、
+    榜上写 3 家"这种没法解释的差异。
+    """
+    moment = now or datetime.now(UTC)
+    urls = await _latest_urls(db, [entry.story_id for entry in entries])
+    lines = [
+        f"新事件 · {dg.local_time(moment, timezone):%m-%d %H:%M}",
+        "（同一件事被至少两家独立来源报道才会进榜，以下按热度排序）",
         "",
     ]
     lines.extend(_render_entry(index, entry, urls.get(entry.story_id, "")) for index, entry in enumerate(entries, 1))
@@ -141,11 +169,9 @@ async def render(
 async def _latest_urls(db: Database, story_ids: list[int]) -> dict[int, str]:
     """每个事件取**最新那条报道**的网址，供聊天里点进去。
 
-    取最新而不是最早：读者点进去想看的是当前进展，不是最初那条。事件页把两者都列出来
-    （一手报道 / 重复报道分组），聊天里只给一个入口。
+    取最新而不是最早：读者点进去想看的是当前进展，不是最初那条。事件页把两者都列出来，
+    聊天里只给最新一条——消息变长比点错一条更糟。
     """
-    if not story_ids:
-        return {}
     async with db.session() as session:
         rows = (
             await session.execute(

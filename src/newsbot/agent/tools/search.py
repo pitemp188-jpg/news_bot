@@ -35,6 +35,11 @@ BING_ENDPOINT = "https://www.bing.com/search"
 # 单个订阅源的最长等待：hnrss 实测会挂 20～36 秒，而检索必须等所有源返回，
 # 不给单源设上限就会让一次搜索白等半分钟
 DEFAULT_FEED_TIMEOUT = 8.0
+# 采集用的单源超时。检索要抢时间（用户等着，慢源拖累整次响应），所以默认 8s；
+# 采集是后台作业，多等十几秒没人察觉，而实测 15 个源里有 5 个（venturebeat /
+# theverge / tomshardware / lobste.rs / hnrss）在 8s 内返回不了——用检索的上限
+# 去采集，等于稳定漏掉三分之一的内容
+DEFAULT_COLLECT_FEED_TIMEOUT = 25.0
 # Bing 结果块；旧结构用 li.b_algo，同时兼容 b_algo 出现在 div 上的情况
 _BING_BLOCK = re.compile(
     r'<(?:li|div)[^>]*class="[^"]*\bb_algo\b[^"]*".*?(?=<(?:li|div)[^>]*class="[^"]*\bb_algo\b|</ol>)', re.S
@@ -502,6 +507,41 @@ class SearchTool:
         body = "\n".join(blocks)
         return ToolResult(text=f"{note}\n{body}".strip() if note else body, sources=sources)
 
+    async def latest(
+        self, *, days: int = 1, limit: int = 120, feed_timeout: float | None = None
+    ) -> list[dict[str, Any]]:
+        """拉取全部订阅源在时间窗内的最新条目——**不做关键词过滤**。
+
+        与 `run()` 的区别：`run()` 回答的是"按你的检索词能找到什么"，这里是
+        "这些源上最新有什么"。定时采集要的是后者：没有检索词，也不该由模型决定
+        该采什么（那会让"漏掉什么"不可观测）。两者复用同一份源列表、同一个并发闸、
+        同一套解析与同一套质量过滤（营销导购、栏目页、时间窗），所以采集进来的东西
+        与检索路径一样干净。
+
+        "固定领域组"（AI / 开发 / 云原生 / 科技 / 芯片 / 硬件）就是 `default_feeds()`
+        里每个源自带的 `topics`——15 个源合起来正好覆盖这六个领域，所以一次拉全部源
+        就等价于按领域采集，且比"每个领域各拉一遍 15 个源"少 6 倍请求。
+        """
+        if not self._feeds:
+            logger.warning("未配置任何订阅源，采集无法工作")
+            return []
+        gate = asyncio.Semaphore(self._feed_concurrency)
+
+        limit_seconds = feed_timeout if feed_timeout is not None else DEFAULT_COLLECT_FEED_TIMEOUT
+
+        async def fetch(feed: FeedSource) -> list[dict[str, Any]]:
+            async with gate:
+                items = await self._fetch_feed(feed, timeout=limit_seconds)
+                return [{**item, "weight": feed.weight} for item in items]
+
+        batches = await asyncio.gather(*(fetch(feed) for feed in self._feeds))
+        items = [item for batch in batches for item in batch]
+        # 空检索词：`match_feed_items` 在没有词可匹配时返回各源最新内容（按发布时间倒序），
+        # 正是采集要的语义——不必再写一套过滤，否则时间窗与去重口径会和检索路径分叉
+        hits, _ = match_feed_items(items, "", limit, days=days)
+        logger.info("订阅源采集：%d 个源返回 %d 条，时间窗内保留 %d 条", len(self._feeds), len(items), len(hits))
+        return hits
+
     async def _collect(self, query: str, time_range: str | None) -> tuple[list[dict[str, str]], str]:
         """按配置选引擎；返回（结果, 需要如实告知用户的提示）。"""
         if self.provider == "tavily":
@@ -539,24 +579,28 @@ class SearchTool:
             logger.info("订阅源检索提示: %s", note)
         return hits, note
 
-    async def _fetch_feed(self, feed: FeedSource) -> list[dict[str, str]]:
+    async def _fetch_feed(self, feed: FeedSource, *, timeout: float | None = None) -> list[dict[str, str]]:
         """拉取并解析单个订阅源；返回空列表表示这次没拿到。
 
         超时**不重试**：实测慢源（hnrss 实测挂 20～36 秒）会一直慢，重试只是让整次
-        检索多等一个超时周期。连接类错误**重试一次**：连续检索时实测会出现"整批里
-        几个源同时失败"，那是瞬时抖动，不该当成源不可用。
+        检索多等一个超时周期。连接类错误**重试一次**：连续检索时实测会出现「整批里
+        几个源同时失败」，那是瞬时抖动，不该当成源不可用。
+
+        `timeout` 让调用方按场景给上限：检索取默认的 8s（用户等着），采集取
+        `DEFAULT_COLLECT_FEED_TIMEOUT`（后台作业，宁可慢也要拿全）。
         """
+        limit_seconds = timeout if timeout is not None else self._feed_timeout
         for attempt in (1, 2):
             try:
                 response = await asyncio.wait_for(
-                    self._http().get(feed.url, headers={"User-Agent": USER_AGENT}), timeout=self._feed_timeout
+                    self._http().get(feed.url, headers={"User-Agent": USER_AGENT}), timeout=limit_seconds
                 )
                 response.raise_for_status()
             except (TimeoutError, httpx.TimeoutException):
                 # 写成两个类型：`asyncio.wait_for` 抛的是内置 TimeoutError，而 httpx
                 # 自己抛的 ReadTimeout / ConnectTimeout 与它没有继承关系（实测踩过：
                 # 只捕获内置 TimeoutError 会让 httpx 超时被当成可重试的连接错误）
-                logger.warning("订阅源超时 %s（上限 %.1fs），跳过", feed.url, self._feed_timeout)
+                logger.warning("订阅源超时 %s（上限 %.1fs），跳过", feed.url, limit_seconds)
                 return []
             except Exception as exc:
                 if attempt == 1:

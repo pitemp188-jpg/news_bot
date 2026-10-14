@@ -23,6 +23,8 @@ class FakeSearchTool:
         default_factory=lambda: {"type": "object", "properties": {"query": {"type": "string"}}, "required": []}
     )
     queries: list[str] = field(default_factory=list)
+    # `latest()` 的调用记录（定时采集用）；与 `queries` 分开记，谁调的看得出来
+    latest_calls: list[tuple[int, int, float | None]] = field(default_factory=list)
 
     async def run(self, query: str = "", **_: Any) -> ToolResult:
         self.queries.append(query)
@@ -32,6 +34,13 @@ class FakeSearchTool:
             f"{i}. {hit['title']}\n   {hit['url']}\n   {hit.get('snippet', '')}" for i, hit in enumerate(self.hits, 1)
         ]
         return ToolResult(text="\n".join(lines), sources=[Source(title=h["title"], url=h["url"]) for h in self.hits])
+
+    async def latest(
+        self, *, days: int = 1, limit: int = 120, feed_timeout: float | None = None
+    ) -> list[dict[str, Any]]:
+        """采集替身：把预设命中当成「源上最新的条目」返回。"""
+        self.latest_calls.append((days, limit, feed_timeout))
+        return [dict(hit) for hit in self.hits]
 
     async def aclose(self) -> None:
         return None
