@@ -39,9 +39,12 @@ class CollectStats:
     failed: bool = False
 
     def line(self) -> str:
+        # 不带「采集：」前缀：与 `RefreshStats.line()` 同一约定——统计行只说做了什么，
+        # 由调用方补上场景（「定时采集：」「手动采集：」）。自带前缀会让日志读成
+        # 「定时采集：采集：源上取回 146 条」，而且换个调用方就对不上了
         if self.failed:
-            return "采集失败（详见日志）"
-        return f"采集：源上取回 {self.fetched} 条 → 新增入库 {self.written} 条"
+            return "失败（详见日志）"
+        return f"源上取回 {self.fetched} 条 → 新增入库 {self.written} 条"
 
 
 async def collect(

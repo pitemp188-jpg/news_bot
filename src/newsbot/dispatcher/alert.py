@@ -54,7 +54,7 @@ class AlertStats:
         if not self.candidates:
             return self.note or "没有新事件"
         base = (
-            f"新事件 {self.candidates} 个 → 推送 {self.sent} 条"
+            f"候选 {self.candidates} 个 → 推送 {self.sent} 条"
             f"（未过入选门槛 {self.skipped_unselected}，首轮静默 {self.bootstrapped}，失败 {self.failed}）"
         )
         # 后面的 `note` 不能丢：它写着"为什么一条都没发"（没有目标 / 通道未就绪）。

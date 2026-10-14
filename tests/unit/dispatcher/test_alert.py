@@ -282,3 +282,17 @@ async def test_resolve_target_returns_none_when_nothing_ever_sent(tmp_path: Path
         assert await alert.resolve_target(db, "qqbot", "") is None
     finally:
         await db.dispose()
+
+
+def test_alert_line_does_not_repeat_the_caller_prefix() -> None:
+    """统计行不带「新事件」前缀——调用方已经写了「新事件告警：」。
+
+    不加这句断言时的实际日志是「新事件告警：新事件 3 个 → 推送 1 条」，同一个词连着
+    出现两次；日志是本项目唯一能在长跑里回答「做过什么」的地方，读起来不该有噪音。
+    """
+    line = alert.AlertStats(candidates=3, sent=1, skipped_unselected=2).line()
+    assert line.startswith("候选 3 个 → 推送 1 条"), line
+    assert "新事件" not in line
+
+    quiet = alert.AlertStats()
+    assert quiet.line() == "没有新事件"

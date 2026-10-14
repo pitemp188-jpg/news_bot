@@ -139,3 +139,20 @@ async def test_collect_on_empty_result(tmp_path: Path) -> None:
         assert "取回 0 条" in stats.line()
     finally:
         await db.dispose()
+
+
+def test_collect_line_is_self_describing_without_a_label() -> None:
+    """统计行只说做了什么，场景由调用方补。
+
+    回归用例（真机日志抓到）：`line()` 一度自带「采集：」前缀，而调用方又写成
+    `"定时采集：%s"`，日志读成「定时采集：采集：源上取回 146 条」——同一个词连着两次。
+    约定与 `RefreshStats.line()` 一致：统计行不带场景前缀。
+    """
+    from newsbot.dispatcher.collect import CollectStats
+
+    line = CollectStats(fetched=146, written=36).line()
+    assert line == "源上取回 146 条 → 新增入库 36 条"
+    assert "采集" not in line, "场景由调用方补，统计行里不该再出现"
+
+    failed = CollectStats(failed=True).line()
+    assert failed == "失败（详见日志）", "失败也要能拼进「定时采集：…」里读通"
