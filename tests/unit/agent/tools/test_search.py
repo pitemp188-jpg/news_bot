@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -740,3 +740,119 @@ def test_parse_feed_drops_index_page_items() -> None:
     </channel></rss>"""
     items = parse_feed(rss, "东方财富")
     assert [item["title"] for item in items] == ["某公司发布新一代推理芯片，单位算力成本下降四成"]
+
+
+# ── 采集取数口（latest） ──
+
+
+def _rss(*items: str, channel: str = "测试源") -> str:
+    return f'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>{channel}</title>{"".join(items)}</channel></rss>'
+
+
+def _item(title: str, slug: str, *, hours_ago: float = 2, host: str = "src.example") -> str:
+    """一条 RSS 条目；日期取"几小时前"，默认落在采集的时间窗内。"""
+    import email.utils
+
+    stamp = email.utils.format_datetime(datetime.now(UTC) - timedelta(hours=hours_ago))
+    return (
+        f"<item><title>{title}</title><link>https://{host}/{slug}</link>"
+        f"<pubDate>{stamp}</pubDate><description>摘要 {slug}</description></item>"
+    )
+
+
+@respx.mock
+async def test_latest_does_not_filter_by_keyword() -> None:
+    """采集要的是「源上最新有什么」，不是「按某个词能找到什么」。
+
+    这是它与 `run()` 的本质区别：`run()` 由检索词收窄，采集没有检索词——源上有什么
+    就取什么。若这里也按词过滤，定时采集就会退化成"只采某一个主题"，
+    而"漏掉了什么"完全不可观测。
+    """
+    feed = "https://src.example/feed"
+    respx.get(feed).mock(
+        return_value=httpx.Response(
+            200, text=_rss(_item("某公司发布新一代推理芯片", "a"), _item("某地举办马拉松", "b"))
+        )
+    )
+    tool = SearchTool(AgentSection(search_results=8), Secrets(search_provider="feeds"), feeds=[FeedSource(url=feed)])
+    hits = await tool.latest(days=1, limit=50)
+    await tool.aclose()
+
+    assert {hit["title"] for hit in hits} == {"某公司发布新一代推理芯片", "某地举办马拉松"}
+
+
+@respx.mock
+async def test_latest_applies_the_time_window() -> None:
+    """订阅源是内容流，但实测有的源夹带几个月前的旧文，所以时间窗必须真的生效。"""
+    feed = "https://src.example/feed"
+    respx.get(feed).mock(
+        return_value=httpx.Response(
+            200,
+            text=_rss(_item("今天的事", "new"), _item("几个月前的旧文", "old", hours_ago=24 * 120)),
+        )
+    )
+    tool = SearchTool(AgentSection(search_results=8), Secrets(search_provider="feeds"), feeds=[FeedSource(url=feed)])
+    hits = await tool.latest(days=1, limit=50)
+    await tool.aclose()
+    assert [hit["title"] for hit in hits] == ["今天的事"], "超出时间窗的条目不该被采回来"
+
+
+@respx.mock
+async def test_latest_keeps_undated_items() -> None:
+    """日期判不了 ≠ 是旧的：无日期条目要保留，否则会静默漏掉一整个源的内容。"""
+    feed = "https://src.example/feed"
+    undated = "<item><title>没有日期的条目</title><link>https://src.example/x</link></item>"
+    respx.get(feed).mock(return_value=httpx.Response(200, text=_rss(undated, _item("今天的事", "new"))))
+    tool = SearchTool(AgentSection(search_results=8), Secrets(search_provider="feeds"), feeds=[FeedSource(url=feed)])
+    hits = await tool.latest(days=1, limit=50)
+    await tool.aclose()
+    assert {hit["title"] for hit in hits} == {"没有日期的条目", "今天的事"}
+
+
+@respx.mock
+async def test_latest_respects_the_limit() -> None:
+    """单次上限要传到取数口——否则一次刷新可能被几百条灌满。"""
+    feed = "https://src.example/feed"
+    respx.get(feed).mock(
+        return_value=httpx.Response(200, text=_rss(*[_item(f"第 {index} 件事", str(index)) for index in range(10)]))
+    )
+    tool = SearchTool(AgentSection(search_results=8), Secrets(search_provider="feeds"), feeds=[FeedSource(url=feed)])
+    hits = await tool.latest(days=1, limit=3)
+    await tool.aclose()
+    assert len(hits) == 3
+
+
+@respx.mock
+async def test_latest_contains_a_broken_feed() -> None:
+    """一个源挂了不能把整轮采集废掉——采集是按时跑的，单源失败该被吞掉。"""
+    good, bad = "https://good.example/feed", "https://bad.example/feed"
+    respx.get(good).mock(return_value=httpx.Response(200, text=_rss(_item("能拿到的事", "g", host="good.example"))))
+    respx.get(bad).mock(side_effect=httpx.ConnectTimeout("超时"))
+    tool = SearchTool(
+        AgentSection(search_results=8),
+        Secrets(search_provider="feeds"),
+        feeds=[FeedSource(url=good), FeedSource(url=bad)],
+    )
+    hits = await tool.latest(days=1, limit=50)
+    await tool.aclose()
+    assert [hit["title"] for hit in hits] == ["能拿到的事"]
+
+
+@respx.mock
+async def test_latest_carries_the_source_weight() -> None:
+    """权重必须随条目带回：入库与后续聚簇都按它衡量来源质量。"""
+    feed = "https://src.example/feed"
+    respx.get(feed).mock(return_value=httpx.Response(200, text=_rss(_item("一件事", "a"))))
+    tool = SearchTool(
+        AgentSection(search_results=8), Secrets(search_provider="feeds"), feeds=[FeedSource(url=feed, weight=1.2)]
+    )
+    hits = await tool.latest(days=1, limit=50)
+    await tool.aclose()
+    assert hits[0]["weight"] == 1.2
+
+
+async def test_latest_without_feeds_returns_nothing() -> None:
+    """没配源时返回空，不能抛异常。"""
+    tool = SearchTool(AgentSection(), Secrets(search_provider="feeds"), feeds=[])
+    assert await tool.latest(days=1, limit=50) == []
+    await tool.aclose()

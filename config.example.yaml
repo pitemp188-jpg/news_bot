@@ -31,6 +31,21 @@ delivery:
   max_attempts: 3
   fallback_platform: qqbot # 主通道失败时的备用通道
 
+automation:
+  # 事件层的自动化：定时采集（进料）+ 新事件告警（主动推送）。
+  # 采集让热榜不再依赖"有人问一句"——它按固定领域组拉订阅源的最新条目并入库，
+  # 不调用模型（"把源上最新的东西都取回来"不需要判断力）。
+  collect_enabled: true
+  collect_interval_minutes: 30 # 与事件层刷新同频；15 个源一次拉取实测 5～15s
+  collect_days: 1 # 只收最近这么多天的条目
+  collect_max_items: 120 # 单次入库上限（去重前）
+  # 告警只推「刚出现 + 通过入选门槛」的事件，推过的不再打扰。
+  alert_enabled: true
+  alert_platform: qqbot
+  alert_chat_id: "" # 留空则回退到最近一次成功投递过的会话
+  alert_max_per_run: 3 # 单次最多推几条（爆发时宁可漏推，漏掉的下一轮还在榜上）
+  alert_bootstrap: true # 上线首轮只标记不推送，避免把历史积压一次推光
+
 editorial:
   # 精选：同一份标准对每条候选用模型独立打两次分，两次之和达到 2 倍门槛才入选。
   # 门槛按信源分级定（T1 一手发布 / T1_5 官方账号与准官方 / T2 媒体与个人）。

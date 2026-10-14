@@ -14,6 +14,10 @@
 ```mermaid
 flowchart TD
     CRON[定时任务<br/>APScheduler] --> DISP
+    CRON --> COLLECT[定时采集<br/>订阅源 → 资讯库]
+    CRON --> EVENT
+    COLLECT --> DB
+    EVENT[事件层<br/>聚簇 · 精选 · 热度] --> ALERT[新事件告警] --> GW_OUT
     CHAT[聊天指令<br/>微信 / QQ] --> GW_IN[消息网关·入站<br/>鉴权 / 指令解析]
     GW_IN --> DISP
     ADMIN[管理界面<br/>Vue3] --> API[管理 API<br/>FastAPI] --> DISP
@@ -61,7 +65,7 @@ flowchart TD
 | --- | --- | --- | --- |
 | core | `src/newsbot/core/` | 配置、日志、数据库、ORM 模型、错误类型、LLM 客户端 | `settings`、`get_logger()`、`session()`、`llm.chat()` |
 | gateway | `src/newsbot/gateway/` | 平台适配器（微信 / QQ）、白名单鉴权、聊天指令、入站路由、出站投递 | `BaseAdapter`、`MessageEvent`、`router.send()` |
-| dispatcher | `src/newsbot/dispatcher/` | 任务队列与 worker、超时重试取消、会话上下文、定时调度、执行流水线 | `queue.submit()`、`queue.cancel()`、`scheduler.sync()` |
+| dispatcher | `src/newsbot/dispatcher/` | 任务队列与 worker、超时重试取消、会话上下文、定时调度、定时采集、来源入库、事件层刷新、新事件告警、执行流水线 | `queue.submit()`、`queue.cancel()`、`scheduler.sync()`、`collect.collect()`、`alert.notify()` |
 | agent | `src/newsbot/agent/` | 规划循环 + 工具（search / fetch / browser / newsdb） | `runner.run(query, ctx) -> Findings` |
 | result | `src/newsbot/result/` | 内容去重、事件聚簇、事件热度、精选打分、引用编号、摘要成稿、按平台格式化与分段 | `dedup.keep_indexes()`、`hot.ranking()`、`selection.select()`、`report.build()` |
 | api | `src/newsbot/api/` | 管理后台 REST、登录鉴权、托管前端静态资源 | `/api/*` |
@@ -104,7 +108,7 @@ flowchart TD
 
 ### 4.3 执行流水线
 
-`dispatcher/pipeline.py`：`agent.runner.run()` → 内容去重（合并同一件事、剔除近期已推送）→ 落库用量 → `result.report.build()` → 落库 `report` 与新来源（写 `news_item`）→ `Sender.send()`。
+`dispatcher/pipeline.py`：`agent.runner.run()` → 内容去重（合并同一件事、剔除近期已推送）→ 落库用量 → `result.report.build()` → 落库 `report` 与新来源（写 `news_item`，经 `dispatcher/ingest.py`——与定时采集**共用同一份**入库判据）→ `Sender.send()`。
 `Sender` 由 `app.py` 启动时注入（实际实现为 `gateway.router.send`），dispatcher 不直接 import gateway。
 去重排在用量落库**之前**：语义分组也是一次模型调用，它的用量要一起进 `llm_usage`。
 
@@ -145,6 +149,28 @@ flowchart TD
 线性加会让一个被全网点名的发布会永远压住一切。`score` 是精选分。
 
 命令行可以直接看结果：`python -m newsbot digest --period weekly`（不跑 Agent、不调模型）。
+
+### 4.6 自动采集与新事件告警
+
+上面几节讲的都是「拿到料之后怎么算」。在这一节之前，**料从哪来是被动的**：资讯库只有两个入口——
+用户提问、以及定时订阅跑一次 Agent 检索。实测某一天新入库 0 条（没人触发检索），于是 30 分钟
+一次的事件层刷新永远看到「候选 0 条」，热度榜算的是几天前的存量。两件事把这条链路接上：
+
+**定时采集**（`dispatcher/collect.py` → `dispatcher/ingest.py`）：按固定领域组拉订阅源的最新条目
+并入库。它**不调用模型**——「把这些源上最新的东西都取回来」不需要判断力，交给模型只会让「漏了什么」
+不可观测，还平白多一笔开销。入库判据与检索路径**共用同一份** `store_items`（列表页挡掉、
+按网址去重、补摘要与内容指纹），否则两条路径的口径一分叉，库里就会出现「检索进来的被挡掉、
+采集进来的混进去」这种无从排查的差异。作业在启动时先跑一次，之后按间隔——服务重启恰恰是
+「刚部署完想看效果」的时刻，不该干等一个间隔。
+
+**新事件告警**（`dispatcher/alert.py`）：刷新完成后把「刚出现（6 小时前热度为 0）且通过入选门槛」
+的事件推给用户。两条判据各有理由：已经推过的不再打扰（这是「告警」与「定时推整张榜」的区别），
+而「多少家在说」不等于「值得看」——门槛就是日报用的那套打分，所以告警推的是「日报里也会收的东西」。
+`story.alerted_at` 落库而不是放内存，否则进程一重启就会把同样的事再推一遍。
+
+两道护栏是**必需品而不是偏好**：单次最多推 N 条（爆发时宁可漏推，漏掉的下一轮还在榜上），
+以及**上线首轮只标记不推送**（库里从没推过任何事件时，先把当前达标的批量记下——没有它，
+这个开关第一次打开就是一次轰炸，之后再也没人敢开）。
 
 ## 5. 场景时序
 

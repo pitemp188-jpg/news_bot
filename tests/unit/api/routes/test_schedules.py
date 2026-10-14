@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 
-from newsbot.dispatcher.scheduler import REFRESH_JOB_ID
+from newsbot.dispatcher.scheduler import COLLECT_JOB_ID, REFRESH_JOB_ID
 
 
 def _schedule_jobs(app) -> set[str]:
-    """订阅作业集合。事件层刷新作业与订阅无关、启动即挂上，故先剔除。"""
+    """订阅作业集合。与订阅无关的内置作业（事件层刷新、定时采集）启动即挂上，故先剔除。"""
     assert app.scheduler is not None
-    return app.scheduler.job_ids() - {REFRESH_JOB_ID}
+    return app.scheduler.job_ids() - {REFRESH_JOB_ID, COLLECT_JOB_ID}
 
 
 async def test_list_empty(api) -> None:

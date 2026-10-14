@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from newsbot.core.db import Database
 from newsbot.core.models import NewsItem, ReportItem, Story, StoryScore
-from newsbot.result import board
+from newsbot.result import board, hot
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
 
@@ -282,3 +282,113 @@ async def test_digest_text_renders_the_date_in_the_display_timezone(tmp_path: An
         assert "2026-10-14 日报" in await board.digest_text(db, now=late, timezone="Asia/Shanghai")
     finally:
         await db.dispose()
+
+
+# ── 新事件告警文本 ──
+
+
+async def test_new_event_text_lists_the_events(tmp_path: Any) -> None:
+    """告警文本要带上与榜单同口径的指标。
+
+    用户点开榜单核对时，"2 家报道 · 热度 X · 新出现"必须对得上——两处各写一套渲染，
+    改了一处就会出现「推送里写 2 家、榜上写 3 家」这种没法解释的差异。
+    """
+    db = await _make_db(tmp_path)
+    try:
+        story_id = await _seed(db, title="两家都报的这件事", url="https://a.example/1", source="a.com", hours=2)
+        await _join(db, story_id, title="另一家也报了", url="https://b.example/1", source="b.com")
+        entries = await hot.ranking(db, NOW, limit=10)
+        assert entries, "够门槛的事件应进榜"
+
+        text = await board.new_event_text(db, entries, now=NOW)
+        assert "新事件" in text
+        assert "两家都报的这件事" in text
+        assert "2 家报道" in text
+        assert "新出现" in text, "趋势标签要与榜单一致"
+        assert "https://b.example/1" in text, "要给最新一条报道的链接"
+    finally:
+        await db.dispose()
+
+
+async def test_new_event_text_uses_the_display_timezone(tmp_path: Any) -> None:
+    """表头按展示时区渲染，与热度榜同一套换算（UTC+8 的用户不该看到早 8 小时的时间）。"""
+    db = await _make_db(tmp_path)
+    try:
+        story_id = await _seed(db, title="两家都报的这件事", url="https://a.example/1", source="a.com", hours=2)
+        await _join(db, story_id, title="另一家也报了", url="https://b.example/1", source="b.com")
+        entries = await hot.ranking(db, NOW, limit=10)
+        utc_text = await board.new_event_text(db, entries, now=NOW, timezone="UTC")
+        local_text = await board.new_event_text(db, entries, now=NOW, timezone="Asia/Shanghai")
+        assert "新事件 · 10-13 12:00" in utc_text
+        assert "新事件 · 10-13 20:00" in local_text
+    finally:
+        await db.dispose()
+
+
+# ── 涨跌幅显示 ──
+
+
+def test_trend_pct_is_rendered_as_a_percentage() -> None:
+    """涨跌幅必须真的按百分比渲染。
+
+    回归用例（真机实测抓到）：`trend_pct` 是**比例**（0.159 = 15.9%），而渲染写成
+    `f"{pct:.0f}%"`——数值格式 `%` 不会自动乘 100，于是所有涨跌幅差了 100 倍，
+    又因为四舍五入，±10% 以内的变化一律显示成 `0%`。真机上看到的是
+    「降温 -0%」（实际是 -15.9% 的纯时间衰减），读者完全看不出变化。
+    """
+    down = hot.HotEntry(
+        story_id=1,
+        title="某件事",
+        heat=3.0,
+        index=30.5,
+        participants=4,
+        sources=4,
+        trend="down",
+        trend_pct=-0.1591,
+        badges=[],
+        latest_at=None,
+        first_at=None,
+        participant_names=[],
+    )
+    text = board._render_entry(1, down, "https://example.com/a")
+    assert "-16%" in text, f"应渲染成 -16%，实际：{text}"
+    assert "-0%" not in text
+
+    up = hot.HotEntry(
+        story_id=2,
+        title="另一件事",
+        heat=1.6,
+        index=16.1,
+        participants=2,
+        sources=2,
+        trend="up",
+        trend_pct=1.0618,
+        badges=[],
+        latest_at=None,
+        first_at=None,
+        participant_names=[],
+    )
+    up_text = board._render_entry(2, up, "")
+    assert "106%" in up_text, f"应渲染成 106%，实际：{up_text}"
+    assert "1%" not in up_text.replace("106%", ""), "更不该把 106% 显示成 1%"
+
+
+def test_trend_pct_is_omitted_when_absent() -> None:
+    """没有涨幅（`new` / `flat`）时只显示标签，不显示数字。"""
+    entry = hot.HotEntry(
+        story_id=1,
+        title="刚出现的事",
+        heat=1.0,
+        index=10.0,
+        participants=2,
+        sources=2,
+        trend="new",
+        trend_pct=None,
+        badges=[],
+        latest_at=None,
+        first_at=None,
+        participant_names=[],
+    )
+    text = board._render_entry(1, entry, "")
+    assert "新出现" in text
+    assert "%" not in text, "没有涨幅就不该出现百分号"

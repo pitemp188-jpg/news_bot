@@ -45,8 +45,11 @@ news_bot/
 │   ├── dispatcher/
 │   │   ├── queue.py             # 任务队列、worker、超时重试取消、恢复
 │   │   ├── session.py           # 会话上下文
-│   │   ├── scheduler.py         # 定时调度（订阅作业 + 事件层刷新作业）
+│   │   ├── scheduler.py         # 定时调度（订阅作业 + 定时采集 + 事件层刷新）
+│   │   ├── collect.py           # 定时采集：按固定领域组拉订阅源最新条目（进料，不调模型）
+│   │   ├── ingest.py            # 来源条目入库：挡列表页、按网址去重、补摘要与内容指纹
 │   │   ├── events.py            # 事件层刷新：聚簇未归组资讯 → 两轮打分精选 → 逐小时热度快照
+│   │   ├── alert.py             # 新事件告警：刚出现且过入选门槛的事件主动推给用户
 │   │   └── pipeline.py          # 执行流水线 agent→result→send
 │   ├── agent/
 │   │   ├── runner.py            # 规划循环

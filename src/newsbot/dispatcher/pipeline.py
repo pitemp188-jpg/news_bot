@@ -8,41 +8,22 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from newsbot.core.db import Database
 from newsbot.core.errors import RetriableError
 from newsbot.core.log import get_logger
-from newsbot.core.models import LlmUsage, NewsItem, Report, Task
-from newsbot.core.quality import is_listing
+from newsbot.core.models import LlmUsage, Report, Task
+from newsbot.dispatcher.ingest import store_items
 from newsbot.dispatcher.session import SessionStore
 from newsbot.result import board
-from newsbot.result.dedup import Deduper, Item, content_digest, simhash64, simhash_hex, url_digest
+from newsbot.result.dedup import Deduper, Item
 
 logger = get_logger(__name__)
 
 _CITATION = re.compile(r"\[S(\d+)\]")
-
-
-def _published_at(raw: Any) -> datetime | None:
-    """把来源里的 ISO 发布时间解析成 datetime；解析不了就返回 None。
-
-    容错而非报错：有的源不给日期、有的格式不规范，这些都不该让入库失败——只是
-    这一条的"新鲜度未知"，模型会看到「日期未知」。
-    """
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        logger.debug("无法解析的发布时间: %r", text[:40])
-        return None
-    return stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
 
 
 class Runner(Protocol):
@@ -155,7 +136,7 @@ class Pipeline:
         await session.commit()
 
         if self._remember:
-            await self._store_sources(built.sources)
+            await store_items(self._db, built.sources, origin="检索")
 
         if task.platform and task.chat_id:
             await self._deliver(task, content, report.id)
@@ -252,58 +233,6 @@ class Pipeline:
         findings.sources = [sources[index] for index in merge.kept]
         # 说明被剔除的编号已无必要：被正文引用过的条目在 protect 里，不会被剔除。
         # 这里只留日志，便于排查"为什么这条没列出来"。
-
-    async def _store_sources(self, sources: list[dict[str, str]]) -> None:
-        """把新来源写入资讯库，供后续任务复用、聚簇与去重。
-
-        **列表页 / 搜索页不入库**：Agent 为了找线索会去抓 GitHub Trending、财经频道、
-        搜索结果页，那些页面一旦入库就会变成"报道"，还得跟真文章一起去聚簇。
-        实测 158 条里有 11 条是这类页面（7%），其中两条互相聚成了一个"事件"并占了
-        热度榜首位。判据与实测依据见 `core.quality`。
-        """
-        if not sources:
-            return
-        kept = [item for item in sources if not is_listing(str(item.get("title", "")), str(item.get("url", "")))]
-        if len(kept) != len(sources):
-            logger.info("跳过 %d 条列表页 / 搜索页来源，不入资讯库", len(sources) - len(kept))
-        sources = kept
-        if not sources:
-            return
-        url_hashes = [url_digest(str(item.get("url", ""))) for item in sources]
-        try:
-            async with self._db.session() as session:
-                existing = set(
-                    (
-                        await session.execute(select(NewsItem.url_hash).where(NewsItem.url_hash.in_(url_hashes)))
-                    ).scalars()
-                )
-                for item, digest in zip(sources, url_hashes, strict=True):
-                    if not digest or digest in existing:
-                        continue
-                    # 入库用的内容要与去重时的判据一致（标题 + 摘要），否则历史指纹永远命中不了
-                    body = f"{item.get('title', '')} {item.get('snippet', '')}".strip() or str(item.get("url", ""))
-                    session.add(
-                        NewsItem(
-                            url=str(item.get("url", "")),
-                            url_hash=digest,
-                            title=str(item.get("title", "")),
-                            source=str(item.get("source", "")),
-                            # 摘要存下来是给聚簇用的（只凭标题判"是不是同一件事"会漏掉
-                            # 中英文互译的同一件事）。它与去重判据同源，改动要一起改
-                            summary=str(item.get("snippet", "") or ""),
-                            # 发布时间必须存：它是判断"这条新不新"的依据。此前一直留空，
-                            # 于是模型看不到任何日期，把几天前的旧稿当成"最新进展"；
-                            # news_db 也只能拿抓取时间当新鲜度，旧闻重抓就被算成新的。
-                            published_at=_published_at(item.get("published")),
-                            content_hash=content_digest(body),
-                            simhash=simhash_hex(simhash64(body)),
-                            fetched_at=datetime.now(UTC),
-                        )
-                    )
-                    existing.add(digest)
-                await session.commit()
-        except Exception as exc:  # 入库失败不应影响本次投递
-            logger.warning("资讯入库失败: %s", exc)
 
 
 PipelineExecutor = Callable[[AsyncSession, Task], Awaitable[str | None]]

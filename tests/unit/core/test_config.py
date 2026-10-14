@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from newsbot.core.config import FeedSource, SearchSection, default_feeds, load_config
+from newsbot.core.config import AutomationSection, FeedSource, SearchSection, default_feeds, load_config
 from newsbot.core.errors import ConfigError
 
 
@@ -87,3 +87,31 @@ def test_search_section_keeps_explicit_weight_and_topics() -> None:
     section = SearchSection(feeds=[{"url": "https://www.a.example/feed", "weight": 1.2, "topics": ["AI"]}])
     assert section.feeds == [FeedSource(url="https://www.a.example/feed", weight=1.2, topics=["AI"])]
     assert section.feed_weights() == {"a.example": 1.2}, "域名要去掉 www.，否则权重匹配不上"
+
+
+def test_automation_defaults_keep_the_loop_on() -> None:
+    """采集与告警默认打开。
+
+    锁住默认值的理由：这两个开关是「自动」的全部内容，被改成 False 之后系统会安静地
+    退回「只有人问才动」的状态——没有报错、没有告警，只是热榜不再更新。默认值本身
+    就是一处容易误伤的开关，所以要断言。
+    """
+    section = AutomationSection()
+    assert section.collect_enabled is True
+    assert section.alert_enabled is True
+    assert section.collect_interval_minutes > 0, "间隔为 0 等于不挂采集作业"
+    assert section.collect_feed_timeout_seconds > 10, "采集的单源上限要明显宽于检索（默认 8s）"
+    assert section.alert_max_per_run > 0, "上限为 0 就等于永远不推"
+    assert section.alert_bootstrap is True, "首轮静默必须默认打开，否则上线就是一次轰炸"
+    assert section.alert_chat_id == "", "留空表示回退到最近一次成功投递的会话"
+
+
+def test_collect_feed_timeout_is_wider_than_search() -> None:
+    """采集与检索的单源上限必须分开。
+
+    实测 15 个源里有 5 个在 8s 内返回不了；检索要抢时间（用户等着），采集是后台作业，
+    共用一个上限等于让采集稳定漏掉三分之一的内容。
+    """
+    from newsbot.agent.tools.search import DEFAULT_COLLECT_FEED_TIMEOUT, DEFAULT_FEED_TIMEOUT
+
+    assert DEFAULT_COLLECT_FEED_TIMEOUT > DEFAULT_FEED_TIMEOUT * 2
